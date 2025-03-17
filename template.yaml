@@ -1,0 +1,78 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  lambda_template
+
+  Sample SAM Template for lambda_template
+
+Parameters:
+  StageName:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - prod
+    Description: The stage name for the API (dev or prod)
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    Timeout: 7
+    MemorySize: 1000 # Set memory to 1000MB
+    EphemeralStorage:
+      Size: 1000 # Set ephemeral storage to 1000MB
+    Tracing: Active
+    # You can add LoggingConfig parameters such as the Logformat, Log Group, and SystemLogLevel or ApplicationLogLevel. Learn more here https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/sam-resource-function.html#sam-function-loggingconfig.
+    LoggingConfig:
+      LogFormat: JSON
+  Api:
+    TracingEnabled: true
+Resources:
+  MyApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref StageName # Use the parameter to define dev or prod
+      Cors:
+        AllowMethods: "'POST,GET,PUT,DELETE'" # Allow multiple methods
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,Origin,Access-Control-Allow-Origin,Token, token, access_token, X-Refresh-Token,Metadata'"
+        AllowOrigin: "'*'" # You can change this to a specific domain for security
+  FunctionNameLambdaHandler:
+    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+    Properties:
+      CodeUri: src/
+      Handler: app.lambdaHandler
+      Runtime: nodejs20.x
+      Architectures:
+      - x86_64
+      Events:
+        FunctionNameLambdaHandler:
+          Type: Api # More info about API Event Source: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#api
+          Properties:
+            Path: /hello
+            Method: get
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2020
+        Sourcemap: true
+        EntryPoints:
+        - app.ts
+
+  ApplicationResourceGroup:
+    Type: AWS::ResourceGroups::Group
+    Properties:
+      Name:
+        Fn::Sub: ApplicationInsights-SAM-${AWS::StackName}
+      ResourceQuery:
+        Type: CLOUDFORMATION_STACK_1_0
+  ApplicationInsightsMonitoring:
+    Type: AWS::ApplicationInsights::Application
+    Properties:
+      ResourceGroupName:
+        Ref: ApplicationResourceGroup
+      AutoConfigurationEnabled: 'true'
+Outputs:
+  # API Gateway endpoint URL for the specified Stage (dev or prod)
+  WebEndpoint:
+    Description: API Gateway endpoint URL for the specified stage
+    Value: !Sub "https://${MyApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/"
