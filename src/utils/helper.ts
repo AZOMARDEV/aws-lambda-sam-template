@@ -2,25 +2,33 @@ import { AuthMetadata } from "../beans/request";
 import HttpError from "../exception/httpError";
 
 /**
- * Validates metadata structure
+ * Generates a numeric OTP of specified length.
  */
-const validateMetadata = (metadata: any): boolean => {
-    if (!metadata) return false;
-
-    const requiredFields = ['language', 'location', 'device', "added_date"];
-    return requiredFields.every(field => metadata[field]);
+export const generateOTP = (length: number = 6): string => {
+    const min = Math.pow(10, length - 1);
+    const max = Math.pow(10, length) - 1;
+    return Math.floor(Math.random() * (max - min + 1) + min).toString();
 };
 
 /**
- * Extracts and validates auth data and metadata from headers
+ * Validates the structure of metadata.
+ */
+const validateMetadata = (metadata: any): boolean => {
+    if (!metadata || typeof metadata !== 'object') return false;
+
+    const requiredFields = ['language', 'location', 'device', 'added_date'];
+    return requiredFields.every(field => field in metadata);
+};
+
+/**
+ * Extracts and validates metadata from headers.
  */
 const extractAuthData = (headers: Record<string, any>): AuthMetadata => {
     try {
+        let authorization: string | null = null;
+        let metadata: any = null;
 
-        let authorization = null;
-        // Parse and validate metadata
-        let metadata = null;
-        const metadataHeader = headers["metadata"];
+        const metadataHeader = headers['metadata'];
 
         if (!metadataHeader) {
             throw new HttpError('Metadata is required', 400);
@@ -28,24 +36,23 @@ const extractAuthData = (headers: Record<string, any>): AuthMetadata => {
 
         try {
             metadata = JSON.parse(metadataHeader);
-        } catch (error) {
-            throw new HttpError('Invalid metadata format', 400);
+        } catch {
+            throw new HttpError('Invalid metadata format (must be JSON)', 400);
         }
 
         if (!validateMetadata(metadata)) {
-            throw new HttpError('Invalid metadata structure. Required fields', 400);
+            throw new HttpError('Invalid metadata structure. Required fields: language, location, device, added_date', 400);
         }
 
-
         return { metadata, authorization };
-    } catch (error) {
+    } catch (error: any) {
         if (error instanceof HttpError) throw error;
-        throw new HttpError('Error processing authentication data', 400);
+        throw new HttpError('Error processing authentication metadata', 400);
     }
 };
 
 /**
- * Validates required fields in an object
+ * Validates presence of required fields in an object.
  */
 const validateRequiredFields = (
     data: Record<string, any>,
@@ -65,42 +72,46 @@ const validateRequiredFields = (
     }
 };
 
-
 /**
- * Creates a success response object.
+ * Creates a success response for Lambda.
  */
 function SuccessResponse(response: { message?: string; data?: any }) {
     return {
         statusCode: 200,
         headers: {
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "Content-Type,Authorization,Metadata",
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Headers': 'Content-Type,Authorization,Metadata'
         },
-        body: JSON.stringify({ message: response.message || "Success", ...response?.data, status: 200 }),
+        body: JSON.stringify({
+            status: 200,
+            message: response.message || 'Success',
+            data: response.data
+        })
     };
 }
 
 /**
- * Creates an error response object.
+ * Creates an error response for Lambda.
  */
-function ErrorResponse(response: { status: any; message: any; data: any; type?: any; }) {
-
+function ErrorResponse(response: { status?: number; message?: string; data?: any; type?: string }) {
     return {
-        statusCode: response?.status || 500, // Default to 500 if no status is provided
+        statusCode: response?.status || 500,
         headers: {
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "Content-Type,Authorization,Metadata",
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Headers': 'Content-Type,Authorization,Metadata'
         },
         body: JSON.stringify({
-            status: response?.status, // Add a status field for consistency
-            message: response?.message || "An error occurred", // Default error message
-            type: response?.type || "UnknownError", // Provide an error type if available
-            details: response?.data || response, // Include additional error details or the full response object
-        }),
+            status: response?.status || 500,
+            message: response?.message || 'An error occurred',
+            type: response?.type || 'UnknownError',
+            details: response?.data || response
+        })
     };
 }
 
-
-
-
-export { SuccessResponse, ErrorResponse, validateRequiredFields, extractAuthData };
+export {
+    SuccessResponse,
+    ErrorResponse,
+    validateRequiredFields,
+    extractAuthData
+};

@@ -6,6 +6,18 @@ Description: >
   Sample SAM Template for lambda_template
 
 Parameters:
+  JWTSecret:
+    Type: String
+    Description: Secret key for JWT token
+    Default: mydevjwtsecret   # <-- default value for testing
+  JWTExpiresIn:
+    Type: String
+    Default: 24h
+    Description: JWT expiration time
+  RefreshTokenSecret:
+    Type: String
+    Description: Secret key for refresh tokens
+    Default: mydevrefreshsecret   # <-- default value for testing
   StageName:
     Type: String
     Default: dev
@@ -24,6 +36,10 @@ Globals:
     # You can add LoggingConfig parameters such as the Logformat, Log Group, and SystemLogLevel or ApplicationLogLevel. Learn more here https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/sam-resource-function.html#sam-function-loggingconfig.
     LoggingConfig:
       LogFormat: JSON
+    # Add MONGODB_URI to all functions globally
+    Environment:
+      Variables:
+        MONGODB_URI: mongodb+srv://jabadoor_auth:rhcNL5vdjSNCriUb@mvcluster.lgjgw.mongodb.net/trueid?retryWrites=true&w=majority&appName=MVCluster
   Api:
     TracingEnabled: true
 Resources:
@@ -35,20 +51,98 @@ Resources:
         AllowMethods: "'POST,GET,PUT,DELETE'" # Allow multiple methods
         AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,Origin,Access-Control-Allow-Origin,Token, token, access_token, X-Refresh-Token,Metadata'"
         AllowOrigin: "'*'" # You can change this to a specific domain for security
-  FunctionNameLambdaHandler:
+
+  # Shared role for all functions that need to invoke others
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: LambdaInvokeAndSqsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*"
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:PurgeQueue
+                Resource:
+                  - !GetAtt NotificationSQSQueue.Arn
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub "${TemplatesBucket.Arn}/*"
+
+
+  TemplatesBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        IgnorePublicAcls: false
+        BlockPublicPolicy: false
+        RestrictPublicBuckets: false
+
+  TemplatesBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref TemplatesBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: PublicReadForPDFsFolder
+            Effect: Allow
+            Principal: "*"
+            Action: "s3:GetObject"
+            Resource: !Sub "arn:aws:s3:::${TemplatesBucket}/pdfs/*"
+
+  NotificationSQSQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: notification-queue
+      VisibilityTimeout: 30  # Time in seconds messages stay invisible after being picked up
+      MessageRetentionPeriod: 1209600  # 14 days max retention
+      ReceiveMessageWaitTimeSeconds: 10 # Long polling
+      DelaySeconds: 0
+
+  RegisterAccountLambdaHandler:
     Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
     Properties:
       CodeUri: src/
-      Handler: app.lambdaHandler
+      Handler: functions/auth/register.handler
       Runtime: nodejs20.x
+      Role: !GetAtt LambdaExecutionRole.Arn
       Architectures:
       - x86_64
+      Environment:
+        Variables:
+          SQS_QUEUE_URL: !GetAtt NotificationSQSQueue.QueueUrl
       Events:
-        FunctionNameLambdaHandler:
-          Type: Api # More info about API Event Source: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#api
+        RegisterAccountAPIHandler:
+          Type: Api
           Properties:
-            Path: /hello
-            Method: get
+            Path: /auth/register
+            Method: post
+            RestApiId: !Ref MyApi
     Metadata: # Manage esbuild properties
       BuildMethod: esbuild
       BuildProperties:
@@ -56,7 +150,99 @@ Resources:
         Target: es2020
         Sourcemap: true
         EntryPoints:
-        - app.ts
+          - functions/auth/register.ts
+  ValidationRegisterAccountLambdaHandler:
+    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+    Properties:
+      CodeUri: src/
+      Handler: functions/auth/validate-registration-otp.handler
+      Runtime: nodejs20.x
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Architectures:
+      - x86_64
+      Environment:
+        Variables:
+          SQS_QUEUE_URL: !GetAtt NotificationSQSQueue.QueueUrl
+      Events:
+        ValidationRegisterAccountAPIHandler:
+          Type: Api
+          Properties:
+            Path: /auth/register/validate
+            Method: post
+            RestApiId: !Ref MyApi
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2020
+        Sourcemap: true
+        EntryPoints:
+          - functions/auth/validate-registration-otp.ts
+
+  LoginAccountLambdaHandler:
+    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+    Properties:
+      CodeUri: src/
+      Handler: functions/auth/login.handler
+      Runtime: nodejs20.x
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Architectures:
+      - x86_64
+      Environment:
+        Variables:
+          SQS_QUEUE_URL: !GetAtt NotificationSQSQueue.QueueUrl
+          JWT_SECRET: !Ref JWTSecret
+          JWT_EXPIRES_IN: !Ref JWTExpiresIn
+          REFRESH_TOKEN_SECRET: !Ref RefreshTokenSecret
+      Events:
+        LoginAccountAPIHandler:
+          Type: Api
+          Properties:
+            Path: /auth/login
+            Method: post
+            RestApiId: !Ref MyApi
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2020
+        Sourcemap: true
+        EntryPoints:
+          - functions/auth/login.ts
+
+  MessageSenderHandlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: functions/notifications/send.handler
+      Runtime: nodejs20.x
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Architectures:
+        - x86_64
+      Environment:
+        Variables:
+          BREVO_API_KEY: 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
+          SQS_QUEUE_URL: !GetAtt NotificationSQSQueue.QueueUrl
+          TEMPLATE_BUCKET: !Ref TemplatesBucket
+      Events:
+        EmailSQSQueueEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt NotificationSQSQueue.Arn
+        MessageSenderHandlerAPI:
+          Type: Api
+          Properties:
+            Path: /email/sender
+            Method: post
+            RestApiId: !Ref MyApi
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2020
+        Sourcemap: true
+        EntryPoints:
+          - functions/notifications/send.ts
 
   ApplicationResourceGroup:
     Type: AWS::ResourceGroups::Group
@@ -76,3 +262,4 @@ Outputs:
   WebEndpoint:
     Description: API Gateway endpoint URL for the specified stage
     Value: !Sub "https://${MyApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/"
+

@@ -1,5 +1,6 @@
 // Define a custom error class
 class HttpError extends Error {
+    [x: string]: any;
     status: number;
     data?: any;
 

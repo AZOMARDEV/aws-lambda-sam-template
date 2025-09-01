@@ -17,6 +17,12 @@ lint = true
 capabilities = "CAPABILITY_IAM"
 confirm_changeset = true
 resolve_s3 = true
+stack_name = "trueid"
+s3_prefix = "trueid"
+region = "eu-north-1"
+disable_rollback = true
+parameter_overrides = "StageName=\"dev\""
+image_repositories = []
 
 [default.package.parameters]
 resolve_s3 = true
