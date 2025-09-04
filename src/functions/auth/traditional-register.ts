@@ -156,17 +156,18 @@ class RegisterAccountBusinessHandler {
         // Step 2: Check for existing accounts
         await this.checkExistingAccounts();
 
-        // Step 3: Perform security checks
-        await this.performSecurityChecks();
-
         // Step 4: Hash password (now always required)
         await this.hashPassword();
 
-        // Step 5: Create temp account
-        await this.createTempAccount();
+        if (this.project?.settings?.traditionalFlow.registration.verificationRequired) {
+            // Step 5: Create temp account
+            await this.createTempAccount();
 
-        // Step 6: Send verification code
-        await this.sendVerificationCode();
+            // Step 6: Send verification code
+            await this.sendVerificationCode();
+        } else {
+            throw new HttpError('Self-service registration without verification is not allowed yet', 400);
+        }
 
         // Step 7: Prepare response
         const responseData = this.prepareResponseData();
@@ -223,28 +224,19 @@ class RegisterAccountBusinessHandler {
     private validateRequestData(): void {
         this.logger.debug('Validating registration request data');
 
-        // Updated required fields to include password, firstName, and lastName
-        const requiredFields: string[] = [
-            'password',
-            'firstName', 
-            'lastName',
-            'country', 
-            'termsAccepted', 
-            'privacyPolicyAccepted', 
-            'termsVersion', 
-            'privacyVersion'
-        ];
-        
-        const customMessages: Record<string, string> = {
-            password: 'Password is required',
-            firstName: 'First name is required',
-            lastName: 'Last name is required',
-            country: 'Country is required',
-            termsAccepted: 'Terms of service must be accepted',
-            privacyPolicyAccepted: 'Privacy policy must be accepted',
-            termsVersion: 'Terms version is required',
-            privacyVersion: 'Privacy policy version is required'
-        };
+        if (!this.project?.settings?.traditionalFlow?.registration) {
+            this.logger.error('Traditional registration flow configuration is missing');
+            throw new HttpError('Registration configuration not found', 500);
+        }
+
+        // Get required fields from the settings
+        const requiredFields: string[] = this.project.settings.traditionalFlow.registration.requiredFields;
+
+        // Optional: map custom messages dynamically
+        const customMessages: Record<string, string> = requiredFields.reduce((acc, field) => {
+            acc[field] = `${this.formatFieldName(field)} is required`;
+            return acc;
+        }, {} as Record<string, string>);
 
         validateRequiredFields(this.requestData, requiredFields, customMessages);
 
@@ -253,6 +245,14 @@ class RegisterAccountBusinessHandler {
 
         this.logger.debug('Request validation completed');
     }
+
+    // Helper to prettify field names for messages
+    private formatFieldName(field: string): string {
+        return field
+            .replace(/([A-Z])/g, ' $1') // split camelCase
+            .replace(/^./, str => str.toUpperCase()); // capitalize first letter
+    }
+
 
     private validateSpecificFields(): void {
         // At least one identifier required
@@ -352,12 +352,14 @@ class RegisterAccountBusinessHandler {
             throw new HttpError('Project configuration not found. Please contact support.', 500);
         }
 
+        if (project.settings && !project.settings.traditionalFlow.enabled) {
+            this.logger.error('Traditional authentication flow is not enabled');
+            throw new HttpError('Traditional authentication flow is not enabled', 400);
+        }
+
         this.project = project;
     }
 
-    /**
-     * Step 2: Check for existing accounts
-     */
     private async checkExistingAccounts(): Promise<void> {
         this.logger.debug('Checking for existing accounts');
 
@@ -375,7 +377,7 @@ class RegisterAccountBusinessHandler {
             conditions.push({ username: this.requestData.username.toLowerCase() });
         }
 
-        // Check main accounts
+        // Check main accounts (cannot overwrite)
         const existingAccount = await Account.findOne({
             $or: conditions,
             accountStatus: { $ne: 'deactivated' }
@@ -390,88 +392,86 @@ class RegisterAccountBusinessHandler {
             throw new HttpError(`An account with this ${conflictField} already exists`, 409);
         }
 
-        // Check temp accounts (clean up expired ones first)
-        await TempAccount.cleanupExpired();
-
-        const existingTempAccount = await TempAccount.findOne({
+        // Check temp accounts
+        const existingTempAccounts = await TempAccount.find({
             $or: conditions,
             status: { $in: ['active', 'verified', 'partial'] },
             expiresAt: { $gt: new Date() }
         });
 
-        if (existingTempAccount) {
-            let conflictField = '';
-            if (existingTempAccount.email === this.requestData.email?.toLowerCase()) conflictField = 'email';
-            else if (existingTempAccount.phone === this.requestData.phone) conflictField = 'phone';
-            else if (existingTempAccount.username === this.requestData.username?.toLowerCase()) conflictField = 'username';
+        if (existingTempAccounts.length > 0) {
+            // Delete all conflicting temp accounts so we can start fresh
+            const deleteIds = existingTempAccounts.map(acc => acc._id);
+            await TempAccount.deleteMany({ _id: { $in: deleteIds } });
 
-            throw new HttpError(`A registration with this ${conflictField} is already in progress. Please check your ${conflictField} for verification instructions.`, 409);
+            this.logger.info(`Deleted ${deleteIds.length} conflicting temporary account(s) to allow new registration`);
         }
 
-        this.logger.debug('No existing accounts found');
+        this.logger.debug('No main account conflicts, temp accounts cleaned up');
     }
+
 
     /**
      * Step 3: Perform security checks
      */
-    private async performSecurityChecks(): Promise<void> {
-        this.logger.debug('Performing security checks');
+    // private async performSecurityChecks(): Promise<void> {
+    //     this.logger.debug('Performing security checks');
 
-        // TODO: Implement actual security checks
-        // - IP reputation check
-        // - Email reputation check (if provided)
-        // - Disposable email detection
-        // - VPN/Tor detection
-        // - Device fingerprinting analysis
-        // - Captcha verification
+    //     // TODO: Implement actual security checks
+    //     // - IP reputation check
+    //     // - Email reputation check (if provided)
+    //     // - Disposable email detection
+    //     // - VPN/Tor detection
+    //     // - Device fingerprinting analysis
+    //     // - Captcha verification
 
-        this.securityCheckResult = {
-            riskScore: 0,
-            riskFactors: [],
-            isHighRisk: false,
-            checks: {
-                emailReputation: true,
-                phoneReputation: true,
-                ipReputation: true,
-                deviceReputation: true,
-                disposableEmail: false,
-                vpnDetected: false,
-                torDetected: false,
-                botDetected: false
-            },
-            lastCheck: new Date()
-        };
+    //     this.securityCheckResult = {
+    //         riskScore: 0,
+    //         riskFactors: [],
+    //         isHighRisk: false,
+    //         checks: {
+    //             emailReputation: true,
+    //             phoneReputation: true,
+    //             ipReputation: true,
+    //             deviceReputation: true,
+    //             disposableEmail: false,
+    //             vpnDetected: false,
+    //             torDetected: false,
+    //             botDetected: false
+    //         },
+    //         lastCheck: new Date()
+    //     };
 
-        // Basic disposable email check
-        if (this.requestData.email) {
-            const disposableDomains = ['10minutemail.com', 'tempmail.org', 'guerrillamail.com'];
-            const emailDomain = this.requestData.email.split('@')[1]?.toLowerCase();
-            if (disposableDomains.includes(emailDomain)) {
-                this.securityCheckResult.checks.disposableEmail = true;
-                this.securityCheckResult.riskScore += 30;
-                this.securityCheckResult.riskFactors.push('Disposable email detected');
-            }
-        }
+    //     // Basic disposable email check
+    //     if (this.requestData.email) {
+    //         const disposableDomains = ['10minutemail.com', 'tempmail.org', 'guerrillamail.com'];
+    //         const emailDomain = this.requestData.email.split('@')[1]?.toLowerCase();
+    //         if (disposableDomains.includes(emailDomain)) {
+    //             this.securityCheckResult.checks.disposableEmail = true;
+    //             this.securityCheckResult.riskScore += 30;
+    //             this.securityCheckResult.riskFactors.push('Disposable email detected');
+    //         }
+    //     }
 
-        // TODO: Verify captcha token
-        if (this.requestData.captchaToken) {
-            // Implement captcha verification
-            this.logger.debug('Captcha token provided for verification');
-        }
+    //     // TODO: Verify captcha token
+    //     if (this.requestData.captchaToken) {
+    //         // Implement captcha verification
+    //         this.logger.debug('Captcha token provided for verification');
+    //     }
 
-        if (this.securityCheckResult.riskScore > 70) {
-            this.securityCheckResult.isHighRisk = true;
-            this.logger.warn('High risk registration detected', {
-                riskScore: this.securityCheckResult.riskScore,
-                riskFactors: this.securityCheckResult.riskFactors
-            });
-        }
+    //     if (this.securityCheckResult.riskScore > 70) {
+    //         this.securityCheckResult.isHighRisk = true;
+    //         this.logger.warn('High risk registration detected', {
+    //             riskScore: this.securityCheckResult.riskScore,
+    //             riskFactors: this.securityCheckResult.riskFactors
+    //         });
+    //     }
 
-        this.logger.debug('Security checks completed', {
-            riskScore: this.securityCheckResult.riskScore,
-            isHighRisk: this.securityCheckResult.isHighRisk
-        });
-    }
+    //     this.logger.debug('Security checks completed', {
+    //         riskScore: this.securityCheckResult.riskScore,
+    //         isHighRisk: this.securityCheckResult.isHighRisk
+    //     });
+    // }
 
     /**
      * Step 4: Hash password (now always required) using bcryptjs

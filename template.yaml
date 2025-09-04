@@ -39,7 +39,7 @@ Globals:
     # Add MONGODB_URI to all functions globally
     Environment:
       Variables:
-        MONGODB_URI: mongodb+srv://jabadoor_auth:rhcNL5vdjSNCriUb@mvcluster.lgjgw.mongodb.net/trueid?retryWrites=true&w=majority&appName=MVCluster
+        MONGODB_URI: mongodb+srv://jabadoorapp:jbH79nBVnVgk6BVE@jabadoorapp.n6uc5.mongodb.net/trueid?retryWrites=true&w=majority&appName=JabadoorApp
   Api:
     TracingEnabled: true
 Resources:
@@ -87,8 +87,6 @@ Resources:
                 Action:
                   - s3:GetObject
                 Resource: !Sub "${TemplatesBucket.Arn}/*"
-
-
   TemplatesBucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
@@ -101,7 +99,6 @@ Resources:
         IgnorePublicAcls: false
         BlockPublicPolicy: false
         RestrictPublicBuckets: false
-
   TemplatesBucketPolicy:
     Type: AWS::S3::BucketPolicy
     Properties:
@@ -114,7 +111,6 @@ Resources:
             Principal: "*"
             Action: "s3:GetObject"
             Resource: !Sub "arn:aws:s3:::${TemplatesBucket}/pdfs/*"
-
   NotificationSQSQueue:
     Type: AWS::SQS::Queue
     Properties:
@@ -128,7 +124,7 @@ Resources:
     Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
     Properties:
       CodeUri: src/
-      Handler: functions/auth/register.handler
+      Handler: functions/auth/traditional-register.handler
       Runtime: nodejs20.x
       Role: !GetAtt LambdaExecutionRole.Arn
       Architectures:
@@ -140,7 +136,7 @@ Resources:
         RegisterAccountAPIHandler:
           Type: Api
           Properties:
-            Path: /auth/register
+            Path: /auth/traditional/register
             Method: post
             RestApiId: !Ref MyApi
     Metadata: # Manage esbuild properties
@@ -150,12 +146,12 @@ Resources:
         Target: es2020
         Sourcemap: true
         EntryPoints:
-          - functions/auth/register.ts
+          - functions/auth/traditional-register.ts
   ValidationRegisterAccountLambdaHandler:
     Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
     Properties:
       CodeUri: src/
-      Handler: functions/auth/validate-registration-otp.handler
+      Handler: functions/auth/traditional-verify.handler
       Runtime: nodejs20.x
       Role: !GetAtt LambdaExecutionRole.Arn
       Architectures:
@@ -167,7 +163,7 @@ Resources:
         ValidationRegisterAccountAPIHandler:
           Type: Api
           Properties:
-            Path: /auth/register/validate
+            Path: /auth/traditional/verify
             Method: post
             RestApiId: !Ref MyApi
     Metadata: # Manage esbuild properties
@@ -177,8 +173,7 @@ Resources:
         Target: es2020
         Sourcemap: true
         EntryPoints:
-          - functions/auth/validate-registration-otp.ts
-
+          - functions/auth/traditional-verify.ts
   LoginAccountLambdaHandler:
     Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
     Properties:
@@ -210,6 +205,235 @@ Resources:
         EntryPoints:
           - functions/auth/login.ts
 
+  CombinedAccountLambdaHandler:
+    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+    Properties:
+      CodeUri: src/
+      Handler: functions/auth/mfa-combined-auth.handler
+      Runtime: nodejs20.x
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Architectures:
+      - x86_64
+      Environment:
+        Variables:
+          SQS_QUEUE_URL: !GetAtt NotificationSQSQueue.QueueUrl
+          JWT_SECRET: !Ref JWTSecret
+          JWT_EXPIRES_IN: !Ref JWTExpiresIn
+          REFRESH_TOKEN_SECRET: !Ref RefreshTokenSecret
+      Events:
+        CombinedAccountAPIHandler:
+          Type: Api
+          Properties:
+            Path: /auth/combined
+            Method: post
+            RestApiId: !Ref MyApi
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2020
+        Sourcemap: true
+        EntryPoints:
+          - functions/auth/mfa-combined-auth.ts
+  CompleteAccountLambdaHandler:
+    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+    Properties:
+      CodeUri: src/
+      Handler: functions/auth/complete-account.handler
+      Runtime: nodejs20.x
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Architectures:
+      - x86_64
+      Environment:
+        Variables:
+          SQS_QUEUE_URL: !GetAtt NotificationSQSQueue.QueueUrl
+          JWT_SECRET: !Ref JWTSecret
+          JWT_EXPIRES_IN: !Ref JWTExpiresIn
+          REFRESH_TOKEN_SECRET: !Ref RefreshTokenSecret
+      Events:
+        CompleteAccountAPIHandler:
+          Type: Api
+          Properties:
+            Path: /auth/complete-account
+            Method: post
+            RestApiId: !Ref MyApi
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2020
+        Sourcemap: true
+        EntryPoints:
+          - functions/auth/complete-account.ts
+
+  LogOutAccountLambdaHandler:
+    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+    Properties:
+      CodeUri: src/
+      Handler: functions/auth/logout.handler
+      Runtime: nodejs20.x
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Architectures:
+      - x86_64
+      Environment:
+        Variables:
+          JWT_SECRET: !Ref JWTSecret
+          JWT_EXPIRES_IN: !Ref JWTExpiresIn
+          REFRESH_TOKEN_SECRET: !Ref RefreshTokenSecret
+      Events:
+        LogOutAccountAPIHandler:
+          Type: Api
+          Properties:
+            Path: /auth/logout
+            Method: post
+            RestApiId: !Ref MyApi
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2020
+        Sourcemap: true
+        EntryPoints:
+          - functions/auth/logout.ts
+  RefreshTokenAccountLambdaHandler:
+    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+    Properties:
+      CodeUri: src/
+      Handler: functions/auth/refresh-token.handler
+      Runtime: nodejs20.x
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Architectures:
+      - x86_64
+      Environment:
+        Variables:
+          JWT_SECRET: !Ref JWTSecret
+          JWT_EXPIRES_IN: !Ref JWTExpiresIn
+          REFRESH_TOKEN_SECRET: !Ref RefreshTokenSecret
+      Events:
+        RefreshTokenAccountAPIHandler:
+          Type: Api
+          Properties:
+            Path: /auth/refresh-token
+            Method: post
+            RestApiId: !Ref MyApi
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2020
+        Sourcemap: true
+        EntryPoints:
+          - functions/auth/refresh-token.ts
+  ValidateTokenAccountLambdaHandler:
+    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+    Properties:
+      CodeUri: src/
+      Handler: functions/auth/validation-token.handler
+      Runtime: nodejs20.x
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Architectures:
+      - x86_64
+      Environment:
+        Variables:
+          JWT_SECRET: !Ref JWTSecret
+          JWT_EXPIRES_IN: !Ref JWTExpiresIn
+          REFRESH_TOKEN_SECRET: !Ref RefreshTokenSecret
+      Events:
+        ValidateTokenAccountAPIHandler:
+          Type: Api
+          Properties:
+            Path: /auth/validation-token
+            Method: post
+            RestApiId: !Ref MyApi
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2020
+        Sourcemap: true
+        EntryPoints:
+          - functions/auth/validation-token.ts
+
+  ForgetPasswordAccountLambdaHandler:
+    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+    Properties:
+      CodeUri: src/
+      Handler: functions/auth/forget-password.handler
+      Runtime: nodejs20.x
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Architectures:
+      - x86_64
+      Environment:
+        Variables:
+          SQS_QUEUE_URL: !GetAtt NotificationSQSQueue.QueueUrl
+      Events:
+        ForgetPasswordAccountAPIHandler:
+          Type: Api
+          Properties:
+            Path: /auth/forget-password
+            Method: post
+            RestApiId: !Ref MyApi
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2020
+        Sourcemap: true
+        EntryPoints:
+          - functions/auth/forget-password.ts
+  ResetPasswordAccountLambdaHandler:
+    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+    Properties:
+      CodeUri: src/
+      Handler: functions/auth/reset-password.handler
+      Runtime: nodejs20.x
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Architectures:
+      - x86_64
+      Events:
+        ResetPasswordAccountAPIHandler:
+          Type: Api
+          Properties:
+            Path: /auth/reset-password
+            Method: post
+            RestApiId: !Ref MyApi
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2020
+        Sourcemap: true
+        EntryPoints:
+          - functions/auth/reset-password.ts
+
+  ResendValidationCodeAccountLambdaHandler:
+    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+    Properties:
+      CodeUri: src/
+      Handler: functions/auth/resend-verification-code.handler
+      Runtime: nodejs20.x
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Architectures:
+      - x86_64
+      Environment:
+        Variables:
+          SQS_QUEUE_URL: !GetAtt NotificationSQSQueue.QueueUrl
+      Events:
+        ResendValidationCodeAccountAPIHandler:
+          Type: Api
+          Properties:
+            Path: /auth/resend-validation-code
+            Method: post
+            RestApiId: !Ref MyApi
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2020
+        Sourcemap: true
+        EntryPoints:
+          - functions/auth/resend-verification-code.ts
+
   MessageSenderHandlerFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -221,9 +445,10 @@ Resources:
         - x86_64
       Environment:
         Variables:
-          BREVO_API_KEY: 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
+          BREVO_API_KEY: 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
           SQS_QUEUE_URL: !GetAtt NotificationSQSQueue.QueueUrl
           TEMPLATE_BUCKET: !Ref TemplatesBucket
+          
       Events:
         EmailSQSQueueEvent:
           Type: SQS
@@ -243,6 +468,55 @@ Resources:
         Sourcemap: true
         EntryPoints:
           - functions/notifications/send.ts
+
+  CreateProjectHandlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: functions/project/create.handler
+      Runtime: nodejs20.x
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Architectures:
+        - x86_64
+      Events:
+        CreateProjectHandlerAPI:
+          Type: Api
+          Properties:
+            Path: /project/create
+            Method: post
+            RestApiId: !Ref MyApi
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2020
+        Sourcemap: true
+        EntryPoints:
+          - functions/project/create.ts
+  UpdateProjectHandlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: functions/project/update.handler
+      Runtime: nodejs20.x
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Architectures:
+        - x86_64
+      Events:
+        UpdateProjectHandlerAPI:
+          Type: Api
+          Properties:
+            Path: /project/update
+            Method: post
+            RestApiId: !Ref MyApi
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2020
+        Sourcemap: true
+        EntryPoints:
+          - functions/project/update.ts
 
   ApplicationResourceGroup:
     Type: AWS::ResourceGroups::Group

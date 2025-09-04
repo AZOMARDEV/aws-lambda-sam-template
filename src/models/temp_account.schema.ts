@@ -7,9 +7,9 @@ export interface ITempProfile {
   displayName?: string;
   dateOfBirth?: Date;
   gender?: 'male' | 'female' | 'other' | 'prefer_not_to_say';
-  language: string;
-  timezone: string;
-  country: string;
+  language?: string;
+  timezone?: string;
+  country?: string;
 }
 
 export interface IRegistrationContext {
@@ -144,7 +144,7 @@ export interface ITempAccount extends Document {
   phone?: string;
   username?: string;
   password?: string;
-  profile: ITempProfile;
+  profile?: ITempProfile;
 
   // Registration Context
   registrationContext: IRegistrationContext;
@@ -161,7 +161,7 @@ export interface ITempAccount extends Document {
   complianceData: IComplianceData;
 
   // Status & Timing
-  status: 'active' | 'expired' | 'verified' | 'suspended' | 'rejected';
+  status: 'active' | 'expired' | 'verified' | 'suspended' | 'rejected' | 'completed' | 'converted';
   createdAt: Date;
   updatedAt: Date;
   expiresAt: Date; // Auto-delete if not verified
@@ -223,9 +223,9 @@ const TempProfileSchema = new Schema<ITempProfile>({
     type: String,
     enum: ['male', 'female', 'other', 'prefer_not_to_say']
   },
-  language: { type: String, required: true, default: 'en' },
-  timezone: { type: String, required: true, default: 'UTC' },
-  country: { type: String, required: true }
+  language: { type: String, default: 'en' },
+  timezone: { type: String, default: 'UTC' },
+  country: { type: String }
 }, { _id: false });
 
 const RegistrationContextSchema = new Schema<IRegistrationContext>({
@@ -449,7 +449,7 @@ const TempAccountSchema = new Schema<ITempAccount>({
     maxlength: 30
   },
   password: { type: String },
-  profile: { type: TempProfileSchema, required: true },
+  profile: { type: TempProfileSchema },
 
   // Registration Context
   registrationContext: { type: RegistrationContextSchema, required: true },
@@ -472,7 +472,7 @@ const TempAccountSchema = new Schema<ITempAccount>({
   // Status & Timing
   status: {
     type: String,
-    enum: ['active', 'expired', 'verified', 'suspended', 'rejected'],
+    enum: ['active', 'expired', 'verified', 'suspended', 'rejected', 'completed', 'converted'],
     default: 'active'
   },
   lastActivity: { type: Date, default: Date.now },
@@ -524,20 +524,17 @@ TempAccountSchema.pre('save', function (next) {
   // Check if all required verifications are completed
   const emailOk = !reqs.emailVerification.required || reqs.emailVerification.completed;
   const phoneOk = !reqs.phoneVerification.required || reqs.phoneVerification.completed;
-  const socialOk = !reqs.socialVerification.required || reqs.socialVerification.completed;
-  const docOk = !reqs.documentVerification.required || reqs.documentVerification.completed;
-  const captchaOk = !reqs.captchaVerification.required || reqs.captchaVerification.completed;
+  // const socialOk = !reqs.socialVerification.required || reqs.socialVerification.completed;
+  // const docOk = !reqs.documentVerification.required || reqs.documentVerification.completed;
+  // const captchaOk = !reqs.captchaVerification.required || reqs.captchaVerification.completed;
 
-  if (emailOk && phoneOk && socialOk && docOk && captchaOk) {
+  if (emailOk && phoneOk) {
     this.overallVerificationStatus = 'completed';
     this.status = 'verified';
   } else {
     // Check if any verification is completed (partial)
     const hasAnyCompleted = reqs.emailVerification.completed ||
-      reqs.phoneVerification.completed ||
-      reqs.socialVerification.completed ||
-      reqs.documentVerification.completed ||
-      reqs.captchaVerification.completed;
+      reqs.phoneVerification.completed;
 
     this.overallVerificationStatus = hasAnyCompleted ? 'partial' : 'pending';
   }

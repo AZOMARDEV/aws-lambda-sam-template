@@ -1,24 +1,23 @@
 import { Schema, model, Document, Types } from 'mongoose';
 
+// Nested Interfaces
+interface IProfilePicture {
+  url: string;
+  verified?: boolean;
+  lastUpdated?: Date;
+}
+
 // Interfaces
 export interface IProfile {
   firstName?: string;
   lastName?: string;
   displayName?: string;
-  avatar?: string;
   bio?: string;
   dateOfBirth?: Date;
   gender?: 'male' | 'female' | 'other' | 'prefer_not_to_say';
+  profilePicture?: IProfilePicture;
   language: string;
   timezone: string;
-  country: string;
-  address?: {
-    street?: string;
-    city?: string;
-    state?: string;
-    postalCode?: string;
-    country?: string;
-  };
 }
 
 export interface ISecurity {
@@ -67,36 +66,21 @@ export interface IPrivacy {
   rightToBeForgotten: boolean;
 }
 
-export interface IMfaConfig {
-  enabled: boolean;
-  methods: {
-    sms?: {
-      enabled: boolean;
-      phoneNumber: string;
-      verified: boolean;
-    };
-    email?: {
-      enabled: boolean;
-      verified: boolean;
-    };
-    totp?: {
-      enabled: boolean;
-      secret: string;
-      backupCodes: string[];
-      verified: boolean;
-    };
-    push?: {
-      enabled: boolean;
-      deviceTokens: string[];
-      verified: boolean;
-    };
-  };
-  backupCodes: {
-    code: string;
-    used: boolean;
-    usedAt?: Date;
-  }[];
-  lastUsed?: Date;
+interface ICoordinates {
+  latitude: number;
+  longitude: number;
+}
+
+interface IAddress {
+  street?: string;
+  unit?: string;
+  city?: string;
+  state?: string;
+  country?: string;
+  postalCode?: string;
+  timezone?: string;
+  coordinates?: ICoordinates;
+  verified?: boolean;
 }
 
 export interface IAccount extends Document {
@@ -104,39 +88,33 @@ export interface IAccount extends Document {
   phone?: string;
   username?: string;
   profile: IProfile;
-  password?: string; // Change from required to optional
-  // Add new field to track password status
+  address?: IAddress;
+  password?: string;
   hasPassword: boolean;
-  // connectedApps: IConnectedApp[];
   security: ISecurity;
-  privacy: IPrivacy;
-  mfaConfig: IMfaConfig;
-  isRootAccount: boolean;
   isEmailVerified: boolean;
   isPhoneVerified: boolean;
-  accountStatus: 'active' | 'suspended' | 'deactivated' | 'pending_verification';
+  accountStatus: {
+    status: 'active' | 'deactivated' | 'suspended' | 'banned' | 'pending_verification';
+    isComplete?: boolean;
+    verificationLevel: string;
+    lastActive?: Date;
+    registrationDate: Date;
+    accountType: string;
+    membershipTier: string;
+    strikeCount?: number;
+  };
   lastLogin?: Date;
   loginCount: number;
-  deactivatedAt?: Date;
-  deactivationReason?: string;
   createdAt: Date;
   updatedAt: Date;
 }
 
-// Schemas
-const AddressSchema = new Schema({
-  street: String,
-  city: String,
-  state: String,
-  postalCode: String,
-  country: String
-}, { _id: false });
 
 const ProfileSchema = new Schema<IProfile>({
   firstName: { type: String, trim: true },
   lastName: { type: String, trim: true },
   displayName: { type: String, trim: true },
-  avatar: String,
   bio: { type: String, maxlength: 500 },
   dateOfBirth: Date,
   gender: {
@@ -145,32 +123,7 @@ const ProfileSchema = new Schema<IProfile>({
   },
   language: { type: String, required: true, default: 'en' },
   timezone: { type: String, required: true, default: 'UTC' },
-  country: { type: String, required: true },
-  address: AddressSchema
 }, { _id: false });
-
-// const ConnectedAppSchema = new Schema<IConnectedApp>({
-//   appId: { type: Schema.Types.ObjectId, ref: 'App', required: true },
-//   roles: [String],
-//   permissions: [String],
-//   metadata: { type: Schema.Types.Mixed, default: {} },
-//   preferences: {
-//     emailNotifications: { type: Boolean, default: true },
-//     smsNotifications: { type: Boolean, default: false },
-//     pushNotifications: { type: Boolean, default: true },
-//     newsletter: { type: Boolean, default: false },
-//     marketingEmails: { type: Boolean, default: false }
-//   },
-//   connectionStatus: {
-//     type: String,
-//     enum: ['connected', 'disconnected', 'suspended'],
-//     default: 'connected'
-//   },
-//   connectedAt: { type: Date, default: Date.now },
-//   lastActiveAt: Date,
-//   loginCount: { type: Number, default: 0 },
-//   totalTimeSpent: { type: Number, default: 0 }
-// }, { _id: false });
 
 const LocationSchema = new Schema({
   country: String,
@@ -265,13 +218,6 @@ const BackupCodeSchema = new Schema({
   usedAt: Date
 }, { _id: false });
 
-const MfaConfigSchema = new Schema<IMfaConfig>({
-  enabled: { type: Boolean, default: false },
-  methods: MfaMethodsSchema,
-  backupCodes: [BackupCodeSchema],
-  lastUsed: Date
-}, { _id: false });
-
 const AccountSchema = new Schema<IAccount>({
   email: {
     type: String,
@@ -321,20 +267,53 @@ const AccountSchema = new Schema<IAccount>({
   },
   // connectedApps: [ConnectedAppSchema],
   security: { type: SecuritySchema, default: () => ({}) },
-  privacy: { type: PrivacySchema, default: () => ({}) },
-  mfaConfig: { type: MfaConfigSchema, default: () => ({}) },
-  isRootAccount: { type: Boolean, default: false },
   isEmailVerified: { type: Boolean, default: false },
   isPhoneVerified: { type: Boolean, default: false },
   accountStatus: {
-    type: String,
-    enum: ['active', 'suspended', 'deactivated', 'pending_verification'],
-    default: 'pending_verification'
+    status: {
+      type: String,
+      enum: ['pending_verification', 'active', 'suspended', 'banned'],
+      index: true
+    },
+    isComplete: {
+      type: Boolean,
+      default: true,
+      index: true
+    },
+    verificationLevel: {
+      type: String,
+      required: true,
+      index: true
+    },
+    lastActive: {
+      type: Date,
+      index: true
+    },
+    registrationDate: {
+      type: Date,
+      required: true,
+      default: Date.now
+    },
+    accountType: {
+      type: String,
+      required: true,
+      enum: ['standard', 'individual', 'business', 'agency'],
+      index: true
+    },
+    membershipTier: {
+      type: String,
+      required: true,
+      enum: ['basic', 'premium', 'gold', 'platinum'],
+      index: true
+    },
+    strikeCount: {
+      type: Number,
+      default: 0,
+      min: 0
+    }
   },
   lastLogin: Date,
   loginCount: { type: Number, default: 0 },
-  deactivatedAt: Date,
-  deactivationReason: String
 }, {
   timestamps: true,
   collection: 'accounts'
@@ -348,12 +327,6 @@ AccountSchema.pre('validate', function (next) {
     return;
   }
 
-  // New validation: If no password, 2FA must be enabled
-  if (!this.password && !this.mfaConfig.enabled) {
-    next(new Error('2FA must be enabled for passwordless accounts'));
-    return;
-  }
-
   // Update hasPassword flag
   this.hasPassword = !!this.password;
 
@@ -364,7 +337,10 @@ AccountSchema.pre('validate', function (next) {
 AccountSchema.index({ email: 1 }, { sparse: true, unique: true });
 AccountSchema.index({ phone: 1 }, { sparse: true, unique: true });
 AccountSchema.index({ username: 1 }, { sparse: true, unique: true });
-AccountSchema.index({ accountStatus: 1 });
+AccountSchema.index({ "accountStatus.status": 1 });
+AccountSchema.index({ "accountStatus.lastActive": -1 });
+AccountSchema.index({ "accountStatus.registrationDate": 1 });
+
 AccountSchema.index({ isEmailVerified: 1 });
 AccountSchema.index({ isPhoneVerified: 1 });
 AccountSchema.index({ lastLogin: 1 });

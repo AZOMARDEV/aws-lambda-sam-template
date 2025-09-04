@@ -6,7 +6,7 @@ import { parseRequestBody } from '../../utils/requestParser';
 import HttpError from '../../exception/httpError';
 import { lambdaMiddleware } from '../../middleware/lambdaMiddleware';
 import { TempAccount, ITempAccount } from '../../models/temp_account.schema';
-import { Account } from '../../models/account.schema';
+import { Account, IAccount } from '../../models/account.schema';
 import { IVerificationCode, VerificationCode } from '../../models/verification_codes.schema';
 
 // ==================== INTERFACES ====================
@@ -341,62 +341,26 @@ class ValidateOTPBusinessHandler {
             hasPassword: !!this.tempAccount!.password, // Set the flag
 
             profile: {
-                firstName: this.tempAccount!.profile.firstName,
-                lastName: this.tempAccount!.profile.lastName,
-                displayName: this.tempAccount!.profile.displayName,
-                dateOfBirth: this.tempAccount!.profile.dateOfBirth,
-                gender: this.tempAccount!.profile.gender,
-                language: this.tempAccount!.profile.language,
-                timezone: this.tempAccount!.profile.timezone,
-                country: this.tempAccount!.profile.country
+                firstName: this.tempAccount!.profile!.firstName,
+                lastName: this.tempAccount!.profile!.lastName,
+                displayName: this.tempAccount!.profile!.displayName,
+                dateOfBirth: this.tempAccount!.profile!.dateOfBirth,
+                gender: this.tempAccount!.profile!.gender,
+                language: this.tempAccount!.profile!.language,
+                timezone: this.tempAccount!.profile!.timezone,
+                country: this.tempAccount!.profile!.country
             },
 
-            preferences: {
-                language: this.tempAccount!.profile.language || 'en',
-                timezone: this.tempAccount!.profile.timezone || 'UTC',
-                notifications: {
-                    email: this.tempAccount!.complianceData.marketingConsent?.email || false,
-                    sms: this.tempAccount!.complianceData.marketingConsent?.sms || false,
-                    push: this.tempAccount!.complianceData.marketingConsent?.push || false
-                }
+            accountStatus: {
+                status: 'active',
+                verificationLevel: 'basic',
+                registrationDate: new Date(),
+                accountType: 'standard',
+                membershipTier: 'basic'
             },
 
-            security: {
-                emailVerified: this.tempAccount!.verificationRequirements.emailVerification.completed,
-                phoneVerified: this.tempAccount!.verificationRequirements.phoneVerification.completed,
-                emailVerifiedAt: this.tempAccount!.verificationRequirements.emailVerification.verifiedAt,
-                phoneVerifiedAt: this.tempAccount!.verificationRequirements.phoneVerification.verifiedAt,
-                lastPasswordChange: this.tempAccount!.password ? new Date() : undefined, // Only set if password exists
-                twoFactorEnabled: !this.tempAccount!.password // Enable 2FA if no password
-            },
-
-            // Force 2FA for passwordless accounts
-            mfaConfig: {
-                enabled: !this.tempAccount!.password, // Enable if no password
-                methods: {
-                    email: {
-                        enabled: !this.tempAccount!.password, // Use email 2FA if no password
-                        verified: this.tempAccount!.verificationRequirements.emailVerification.completed
-                    }
-                }
-            },
-
-            deviceInfo: this.tempAccount!.deviceInfo,
-
-            registrationData: {
-                registrationMethod: this.tempAccount!.registrationContext.registrationMethod,
-                registrationDate: this.tempAccount!.createdAt,
-                registrationIP: this.tempAccount!.deviceInfo.ip,
-                referralSource: this.tempAccount!.registrationContext.referralSource,
-                utmSource: this.tempAccount!.registrationContext.utmSource,
-                utmMedium: this.tempAccount!.registrationContext.utmMedium,
-                utmCampaign: this.tempAccount!.registrationContext.utmCampaign
-            },
-
-            complianceData: this.tempAccount!.complianceData,
-
-            accountStatus: 'active',
-            accountType: 'standard'
+            isEmailVerified: this.tempAccount!.email ? true : false,
+            isPhoneVerified: this.tempAccount!.phone ? true : false,
         };
 
         this.finalAccount = new Account(accountData);
@@ -489,8 +453,8 @@ class ValidateOTPBusinessHandler {
         if (!this.tempAccount) return false;
 
         return !!(
-            this.tempAccount.profile.firstName &&
-            this.tempAccount.profile.lastName
+            this.tempAccount.profile!.firstName &&
+            this.tempAccount.profile!.lastName
         );
     }
 }

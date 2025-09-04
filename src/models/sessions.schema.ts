@@ -152,7 +152,7 @@ const SecurityContextSchema = new Schema<ISecurityContext>({
   mfaMethod: String,
   authenticationMethod: {
     type: String,
-    enum: ['password', 'social', 'magic_link', 'biometric'],
+    enum: ['combined_auth', 'password', 'social', 'magic_link', 'biometric'],
     required: true
   },
   strongAuthentication: { type: Boolean, default: false }

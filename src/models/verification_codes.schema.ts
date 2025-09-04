@@ -31,38 +31,59 @@ export interface IRateLimit {
   blockedUntil?: Date;
 }
 
+type NotificationType =
+  | 'email_verification'
+  | 'phone_verification'
+  | 'password_reset'
+  | 'mfa'
+  | 'login_magic_link'
+  | 'account_recovery'
+  | 'transaction_confirmation';
+
+type NotificationPurpose =
+  | 'register'
+  | 'login'
+  | 'password_recovery'
+  | 'security'
+  | 'subscription'
+  | 'transaction'
+  | 'profile_update'
+  | 'account_recovery'
+  | 'other';
+
+
 export interface IVerificationCode extends Document {
   // Identification
   codeId: string; // Unique identifier for this verification
   accountId?: Types.ObjectId; // May not exist for registration codes
-  
+
   // Code Information
   code: string;
   hashedCode: string; // For security comparison
-  type: 'email_verification' | 'phone_verification' | 'password_reset' | 'mfa' | 'login_magic_link' | 'account_recovery' | 'transaction_confirmation';
-  purpose: string; // Specific purpose description
-  
+  type: NotificationType;
+  purpose: NotificationPurpose;
+
   // Delivery
-  method: 'sms' | 'email' | 'whatsapp' | 'voice' | 'push';
+  method: 'sms' | 'email';
   deliveryInfo: IDeliveryInfo;
-  
+
   // Timing
   createdAt: Date;
   expiresAt: Date;
   usedAt?: Date;
-  
+
   // Status
   status: 'active' | 'used' | 'expired' | 'revoked' | 'failed';
   isUsed: boolean;
-  
+
   // Attempts & Security
   attempts: IVerificationAttempt[];
   maxAttempts: number;
   remainingAttempts: number;
-  
+
   // Rate Limiting
   rateLimit: IRateLimit;
-  
+
   // Context
   context: {
     initiatedBy: 'user' | 'system' | 'admin';
@@ -77,7 +98,7 @@ export interface IVerificationCode extends Document {
       city?: string;
     };
   };
-  
+
   // Security Features
   security: {
     requiresSecureChannel: boolean;
@@ -86,7 +107,7 @@ export interface IVerificationCode extends Document {
     notifyOnFailure: boolean;
     riskScore: number; // 0-100
   };
-  
+
   // Linked Operations
   linkedOperations: {
     operationType: string;
@@ -94,7 +115,7 @@ export interface IVerificationCode extends Document {
     requiresCompletion: boolean;
     completedAt?: Date;
   }[];
-  
+
   // Templates & Localization
   template: {
     templateId?: Types.ObjectId;
@@ -102,14 +123,15 @@ export interface IVerificationCode extends Document {
     customMessage?: string;
     variables?: Record<string, any>;
   };
-  
+
   // Administrative
   revokedAt?: Date;
   revokedBy?: Types.ObjectId;
   revokedReason?: string;
-  
+
   updatedAt: Date;
-  verify: (code: string , context: any) => boolean;
+  verify: (code: string, context: any) => boolean;
+  revoke: (context: any, revokedBy?: Types.ObjectId) => void;
 }
 
 // Schemas
@@ -194,20 +216,20 @@ const TemplateSchema = new Schema({
 
 const VerificationCodeSchema = new Schema<IVerificationCode>({
   // Identification
-  codeId: { 
-    type: String, 
-    required: true, 
+  codeId: {
+    type: String,
+    required: true,
     unique: true,
     default: () => `vc_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`
   },
   accountId: { type: Schema.Types.ObjectId, ref: 'Account' },
-  
+
   // Code Information
-  code: { 
-    type: String, 
+  code: {
+    type: String,
     required: true,
     validate: {
-      validator: function(v: string) {
+      validator: function (v: string) {
         return /^[0-9]{4,8}$/.test(v); // 4-8 digit codes
       },
       message: 'Code must be 4-8 digits'
@@ -216,11 +238,32 @@ const VerificationCodeSchema = new Schema<IVerificationCode>({
   hashedCode: { type: String, required: true },
   type: {
     type: String,
-    enum: ['email_verification', 'phone_verification', 'password_reset', 'mfa', 'login_magic_link', 'account_recovery', 'transaction_confirmation'],
+    enum: [
+      'email_verification',
+      'phone_verification',
+      'password_reset',
+      'mfa',
+      'login_magic_link',
+      'account_recovery',
+      'transaction_confirmation'
+    ],
     required: true
   },
-  purpose: { type: String, required: true },
-  
+  purpose: {
+    type: String,
+    enum: [
+      'register',
+      'login',
+      'password_recovery',
+      'security',
+      'subscription',
+      'transaction',
+      'profile_update',
+      'account_recovery',
+      'other'
+    ],
+    required: true
+  },
   // Delivery
   method: {
     type: String,
@@ -228,15 +271,15 @@ const VerificationCodeSchema = new Schema<IVerificationCode>({
     required: true
   },
   deliveryInfo: { type: DeliveryInfoSchema, required: true },
-  
+
   // Timing
-  expiresAt: { 
-    type: Date, 
+  expiresAt: {
+    type: Date,
     required: true,
     default: () => new Date(Date.now() + 10 * 60 * 1000) // 10 minutes
   },
   usedAt: Date,
-  
+
   // Status
   status: {
     type: String,
@@ -244,14 +287,14 @@ const VerificationCodeSchema = new Schema<IVerificationCode>({
     default: 'active'
   },
   isUsed: { type: Boolean, default: false },
-  
+
   // Attempts & Security
   attempts: [VerificationAttemptSchema],
   maxAttempts: { type: Number, default: 3 },
   remainingAttempts: { type: Number, default: 3 },
-  
+
   // Rate Limiting
-  rateLimit: { 
+  rateLimit: {
     type: RateLimitSchema,
     default: () => ({
       windowStart: new Date(),
@@ -260,19 +303,19 @@ const VerificationCodeSchema = new Schema<IVerificationCode>({
       maxAttemptsPerWindow: 5
     })
   },
-  
+
   // Context
   context: { type: ContextSchema, default: () => ({}) },
-  
+
   // Security Features
   security: { type: SecuritySchema, default: () => ({}) },
-  
+
   // Linked Operations
   linkedOperations: [LinkedOperationSchema],
-  
+
   // Templates & Localization
   template: { type: TemplateSchema, default: () => ({}) },
-  
+
   // Administrative
   revokedAt: Date,
   revokedBy: { type: Schema.Types.ObjectId, ref: 'Account' },
@@ -283,25 +326,25 @@ const VerificationCodeSchema = new Schema<IVerificationCode>({
 });
 
 // Pre-save middleware
-VerificationCodeSchema.pre('save', function(next) {
+VerificationCodeSchema.pre('save', function (next) {
   // Auto-expire if past expiration date
   if (new Date() > this.expiresAt && this.status === 'active') {
     this.status = 'expired';
   }
-  
+
   // Update remaining attempts
   this.remainingAttempts = this.maxAttempts - this.attempts.length;
-  
+
   // Check if should be revoked due to too many attempts
   if (this.remainingAttempts <= 0 && this.status === 'active') {
     this.status = 'failed';
   }
-  
+
   next();
 });
 
 // Instance Methods
-VerificationCodeSchema.methods.verify = function(inputCode: string, context: any = {}): boolean {
+VerificationCodeSchema.methods.verify = function (inputCode: string, context: any = {}): boolean {
   const attempt: IVerificationAttempt = {
     code: inputCode,
     timestamp: new Date(),
@@ -309,14 +352,14 @@ VerificationCodeSchema.methods.verify = function(inputCode: string, context: any
     userAgent: context.userAgent,
     success: false
   };
-  
+
   // Check if code is still valid
   if (this.status !== 'active') {
     attempt.failureReason = `Code is ${this.status}`;
     this.attempts.push(attempt);
     return false;
   }
-  
+
   // Check expiration
   if (new Date() > this.expiresAt) {
     this.status = 'expired';
@@ -324,7 +367,7 @@ VerificationCodeSchema.methods.verify = function(inputCode: string, context: any
     this.attempts.push(attempt);
     return false;
   }
-  
+
   // Check remaining attempts
   if (this.remainingAttempts <= 0) {
     this.status = 'failed';
@@ -332,16 +375,16 @@ VerificationCodeSchema.methods.verify = function(inputCode: string, context: any
     this.attempts.push(attempt);
     return false;
   }
-  
+
   // Verify code (compare with hashed version in real implementation)
   const isValid = bcrypt.compareSync(inputCode, this.hashedCode);
-  
+
   if (isValid) {
     attempt.success = true;
     this.status = 'used';
     this.isUsed = true;
     this.usedAt = new Date();
-    
+
     // Complete linked operations
     this.linkedOperations.forEach((op: { requiresCompletion: any; completedAt: Date; }) => {
       if (op.requiresCompletion) {
@@ -351,48 +394,48 @@ VerificationCodeSchema.methods.verify = function(inputCode: string, context: any
   } else {
     attempt.failureReason = 'Invalid code';
   }
-  
+
   this.attempts.push(attempt);
   return isValid;
 };
 
-VerificationCodeSchema.methods.revoke = function(reason: string, revokedBy?: Types.ObjectId): void {
+VerificationCodeSchema.methods.revoke = function (reason: string, revokedBy?: Types.ObjectId): void {
   this.status = 'revoked';
   this.revokedAt = new Date();
   this.revokedReason = reason;
   this.revokedBy = revokedBy;
 };
 
-VerificationCodeSchema.methods.isExpired = function(): boolean {
+VerificationCodeSchema.methods.isExpired = function (): boolean {
   return new Date() > this.expiresAt;
 };
 
-VerificationCodeSchema.methods.canRetry = function(): boolean {
+VerificationCodeSchema.methods.canRetry = function (): boolean {
   return this.remainingAttempts > 0 && this.status === 'active' && !this.isExpired();
 };
 
-VerificationCodeSchema.methods.updateDeliveryStatus = function(status: string, deliveredAt?: Date, failureReason?: string): void {
+VerificationCodeSchema.methods.updateDeliveryStatus = function (status: string, deliveredAt?: Date, failureReason?: string): void {
   this.deliveryInfo.deliveryStatus = status as any;
   if (deliveredAt) this.deliveryInfo.deliveredAt = deliveredAt;
   if (failureReason) this.deliveryInfo.failureReason = failureReason;
-  
+
   if (status === 'failed' || status === 'bounced') {
     this.status = 'failed';
   }
 };
 
 // Static Methods
-VerificationCodeSchema.statics.generateCode = function(length: number = 6): string {
+VerificationCodeSchema.statics.generateCode = function (length: number = 6): string {
   return Math.floor(Math.random() * Math.pow(10, length))
     .toString()
     .padStart(length, '0');
 };
 
-VerificationCodeSchema.statics.hashCode = function(code: string): string {
+VerificationCodeSchema.statics.hashCode = function (code: string): string {
   return bcrypt.hashSync(code, 12);
 };
 
-VerificationCodeSchema.statics.findActiveCode = function(accountId: Types.ObjectId, type: string, method: string) {
+VerificationCodeSchema.statics.findActiveCode = function (accountId: Types.ObjectId, type: string, method: string) {
   return this.findOne({
     accountId,
     type,
@@ -402,7 +445,7 @@ VerificationCodeSchema.statics.findActiveCode = function(accountId: Types.Object
   }).sort({ createdAt: -1 });
 };
 
-VerificationCodeSchema.statics.cleanupExpired = function() {
+VerificationCodeSchema.statics.cleanupExpired = function () {
   return this.updateMany(
     {
       status: 'active',
@@ -432,33 +475,33 @@ VerificationCodeSchema.index({ accountId: 1, status: 1, expiresAt: 1 });
 VerificationCodeSchema.index({ 'deliveryInfo.recipient': 1, method: 1, status: 1 });
 
 // TTL index for automatic cleanup of old codes
-VerificationCodeSchema.index({ expiresAt: 1 }, { 
+VerificationCodeSchema.index({ expiresAt: 1 }, {
   expireAfterSeconds: 24 * 60 * 60 // Delete 24 hours after expiration
 });
 
 // TTL index for used codes (keep for audit purposes, then clean up)
-VerificationCodeSchema.index({ usedAt: 1 }, { 
+VerificationCodeSchema.index({ usedAt: 1 }, {
   expireAfterSeconds: 30 * 24 * 60 * 60, // Delete used codes after 30 days
-  partialFilterExpression: { 
+  partialFilterExpression: {
     status: 'used',
     usedAt: { $exists: true }
   }
 });
 
 // Validation
-VerificationCodeSchema.pre('validate', function(next) {
+VerificationCodeSchema.pre('validate', function (next) {
   // Ensure expiresAt is in the future for new codes
   if (this.isNew && this.expiresAt <= new Date()) {
     next(new Error('Expiration date must be in the future'));
     return;
   }
-  
+
   // Validate code format based on type
   if (this.type === 'mfa' && !/^[0-9]{6}$/.test(this.code)) {
     next(new Error('MFA codes must be 6 digits'));
     return;
   }
-  
+
   next();
 });
 

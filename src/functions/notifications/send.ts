@@ -300,6 +300,7 @@ interface EmailContent {
     subject: string;
     template: string;
     data: NotificationData;
+    recipient: string;
     metadata?: Record<string, any>;
     pdfAttachment?: {
         s3Key?: string;
@@ -365,7 +366,7 @@ interface NotificationConfig {
 const CONFIG: NotificationConfig = {
     EMAIL_SENDER: {
         NAME: process.env.EMAIL_SENDER_NAME || 'Jabadoor',
-        EMAIL: process.env.EMAIL_SENDER_EMAIL || 'azhariiom@gmail.com'
+        EMAIL: process.env.EMAIL_SENDER_EMAIL || 'omaar.azhaarii@gmail.com'
     },
     EMAIL_API_KEY: process.env.BREVO_API_KEY || '',
     EMAIL_API_URL: 'https://api.brevo.com/v3/smtp/email',
@@ -407,7 +408,14 @@ class EmailService implements INotificationService {
     /**
      * Extract email from data object
      */
-    extractRecipient(data: NotificationData): string {
+    extractRecipient(content: EmailContent): string {
+        const { data , recipient} = content;
+
+        // Recipient email
+        if(recipient){
+            return recipient;
+        }
+
         // Direct email property
         if (data.email) {
             return data.email;
@@ -508,7 +516,7 @@ class EmailService implements INotificationService {
         const { subject, template, data } = content;
 
         try {
-            const recipientEmail = this.extractRecipient(data);
+            const recipientEmail = this.extractRecipient(content);
             const emailTemplate = await this.getEmailTemplate(template);
 
             let emailBody: string;
