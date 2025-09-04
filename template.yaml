@@ -178,7 +178,7 @@ Resources:
     Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
     Properties:
       CodeUri: src/
-      Handler: functions/auth/login.handler
+      Handler: functions/auth/traditional-login.handler
       Runtime: nodejs20.x
       Role: !GetAtt LambdaExecutionRole.Arn
       Architectures:
@@ -193,7 +193,7 @@ Resources:
         LoginAccountAPIHandler:
           Type: Api
           Properties:
-            Path: /auth/login
+            Path: /auth/traditional/login
             Method: post
             RestApiId: !Ref MyApi
     Metadata: # Manage esbuild properties
@@ -203,7 +203,7 @@ Resources:
         Target: es2020
         Sourcemap: true
         EntryPoints:
-          - functions/auth/login.ts
+          - functions/auth/traditional-login.ts
 
   CombinedAccountLambdaHandler:
     Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
