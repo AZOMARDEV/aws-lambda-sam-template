@@ -1,6 +1,6 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { connectDB } from '../../utils/dbconnect';
-import { SuccessResponse, validateRequiredFields } from '../../utils/helper';
+import { extractAuthData, ExtractedAuthData, SuccessResponse, validateRequiredFields } from '../../utils/helper';
 import { createLogger } from '../../utils/logger';
 import { parseRequestBody } from '../../utils/requestParser';
 import HttpError from '../../exception/httpError';
@@ -29,44 +29,18 @@ interface RegisterAccountRequest {
     displayName?: string;
     dateOfBirth?: string; // ISO date string
     gender?: 'male' | 'female' | 'other' | 'prefer_not_to_say';
-    language?: string;
-    timezone?: string;
-    country: string;
 
     // Registration context
     registrationMethod?: 'email' | 'phone';
-    referralSource?: string;
-    utmSource?: string;
-    utmMedium?: string;
-    utmCampaign?: string;
 
     // Compliance
     termsAccepted: boolean;
     privacyPolicyAccepted: boolean;
     termsVersion: string;
     privacyVersion: string;
-    marketingConsent?: {
-        email?: boolean;
-        sms?: boolean;
-        push?: boolean;
-    };
-    gdprConsent?: boolean;
 
-    // Device/Security info
-    deviceInfo: {
-        deviceType?: 'desktop' | 'mobile' | 'tablet';
-        os: string;
-        browser: string;
-        userAgent: string;
-        fingerprint?: {
-            hash: string;
-            components: Record<string, any>;
-        };
-    };
 
-    // Captcha verification
-    captchaToken?: string;
-    captchaProvider?: 'recaptcha' | 'hcaptcha' | 'cloudflare';
+
 }
 
 interface RegisterAccountResponseData {
@@ -94,6 +68,7 @@ interface RegisterAccountResponseData {
 
 class RegisterAccountBusinessHandler {
     private requestData: RegisterAccountRequest;
+    private authdata: ExtractedAuthData;
     private event: APIGatewayProxyEvent;
     private logger: ReturnType<typeof createLogger>;
 
@@ -120,6 +95,7 @@ class RegisterAccountBusinessHandler {
         this.event = event;
         this.requestData = body;
         this.clientIP = event.requestContext?.identity?.sourceIp || 'unknown';
+        this.authdata = extractAuthData(event.headers as Record<string, string>);
 
         // Initialize services
         this.sqsservice = new SQSService();
@@ -336,7 +312,7 @@ class RegisterAccountBusinessHandler {
         }
 
         // Device info validation
-        if (!this.requestData.deviceInfo || !this.requestData.deviceInfo.os || !this.requestData.deviceInfo.browser || !this.requestData.deviceInfo.userAgent) {
+        if (!this.authdata.metadata.device || !this.authdata.metadata.device.os || !this.authdata.metadata.device.browser || !this.authdata.metadata.device.userAgent) {
             throw new HttpError('Device information is required for security purposes', 400);
         }
     }
@@ -495,7 +471,7 @@ class RegisterAccountBusinessHandler {
 
         // Prepare device location (TODO: implement geolocation service)
         this.deviceLocation = {
-            country: this.requestData.country
+            country: this.authdata.metadata.location.country
             // TODO: Add city, region, latitude, longitude from IP geolocation
         };
 
@@ -513,18 +489,14 @@ class RegisterAccountBusinessHandler {
                 displayName: this.requestData.displayName,
                 dateOfBirth: this.requestData.dateOfBirth ? new Date(this.requestData.dateOfBirth) : undefined,
                 gender: this.requestData.gender,
-                language: this.requestData.language || 'en',
-                timezone: this.requestData.timezone || 'UTC',
-                country: this.requestData.country
+                language: this.authdata.metadata.language || 'en',
+                timezone: this.authdata.metadata.location.timezone || 'UTC',
+                country: this.authdata.metadata.location.country
             },
 
             // Registration context
             registrationContext: {
                 registrationMethod: registrationMethod as 'email' | 'phone',
-                referralSource: this.requestData.referralSource,
-                utmSource: this.requestData.utmSource,
-                utmMedium: this.requestData.utmMedium,
-                utmCampaign: this.requestData.utmCampaign
             },
 
             // Verification requirements
@@ -546,23 +518,18 @@ class RegisterAccountBusinessHandler {
                 documentVerification: {
                     required: false,
                     completed: false
-                },
-                captchaVerification: {
-                    required: !!this.requestData.captchaToken,
-                    completed: !!this.requestData.captchaToken, // TODO: verify actual token
-                    provider: this.requestData.captchaProvider || 'recaptcha'
                 }
             },
 
             // Device info
             deviceInfo: {
-                deviceType: this.requestData.deviceInfo.deviceType || 'unknown',
-                os: this.requestData.deviceInfo.os,
-                browser: this.requestData.deviceInfo.browser,
-                userAgent: this.requestData.deviceInfo.userAgent,
+                deviceType: this.authdata.metadata.device.type || 'unknown',
+                os: this.authdata.metadata.device.os,
+                browser: this.authdata.metadata.device.browser,
+                userAgent: this.authdata.metadata.device.userAgent,
                 ip: this.clientIP,
                 location: this.deviceLocation,
-                fingerprint: this.requestData.deviceInfo.fingerprint
+                deviceId: this.authdata.metadata.device.deviceId
             },
 
             // Security check results
@@ -581,23 +548,6 @@ class RegisterAccountBusinessHandler {
                     version: this.requestData.privacyVersion,
                     acceptedAt: new Date(),
                     ip: this.clientIP
-                },
-                marketingConsent: {
-                    email: this.requestData.marketingConsent?.email || false,
-                    sms: this.requestData.marketingConsent?.sms || false,
-                    push: this.requestData.marketingConsent?.push || false,
-                    consentedAt: this.requestData.marketingConsent ? new Date() : undefined
-                },
-                ageVerification: {
-                    verified: !!this.requestData.dateOfBirth,
-                    method: this.requestData.dateOfBirth ? 'self_declared' : undefined,
-                    verifiedAt: this.requestData.dateOfBirth ? new Date() : undefined
-                },
-                gdprConsent: {
-                    given: this.requestData.gdprConsent || false,
-                    version: '1.0',
-                    consentedAt: this.requestData.gdprConsent ? new Date() : undefined,
-                    ip: this.clientIP
                 }
             },
 
@@ -608,8 +558,7 @@ class RegisterAccountBusinessHandler {
             // Metadata
             metadata: {
                 hasCompleteProfile: this.hasProfileInfo(),
-                registrationSource: 'api',
-                deviceFingerprint: this.requestData.deviceInfo.fingerprint?.hash
+                registrationSource: 'api'
             }
         };
 
@@ -620,7 +569,7 @@ class RegisterAccountBusinessHandler {
             'account_created',
             `Registration initiated via ${registrationMethod}`,
             this.clientIP,
-            this.requestData.deviceInfo.userAgent
+            this.authdata.metadata.device.userAgent
         );
 
         await this.tempAccount.save();
@@ -675,9 +624,9 @@ class RegisterAccountBusinessHandler {
                         },
                         sessionId: this.event.requestContext?.requestId,
                         ip: this.clientIP,
-                        userAgent: this.requestData.deviceInfo.userAgent,
+                        userAgent: this.authdata.metadata.device.userAgent,
                         location: {
-                            country: this.requestData.country
+                            country: this.authdata.metadata.location.country
                         }
                     },
                     security: {
@@ -693,7 +642,7 @@ class RegisterAccountBusinessHandler {
                         requiresCompletion: true
                     }],
                     template: {
-                        language: this.requestData.language || 'en',
+                        language: this.authdata.metadata.language || 'en',
                         variables: {
                             firstName: this.requestData.firstName, // Now always available
                             email: this.requestData.email
@@ -774,9 +723,9 @@ class RegisterAccountBusinessHandler {
                         },
                         sessionId: this.event.requestContext?.requestId,
                         ip: this.clientIP,
-                        userAgent: this.requestData.deviceInfo.userAgent,
+                        userAgent: this.authdata.metadata.device.userAgent,
                         location: {
-                            country: this.requestData.country
+                            country: this.authdata.metadata.location.country
                         }
                     },
                     security: {
@@ -792,7 +741,7 @@ class RegisterAccountBusinessHandler {
                         requiresCompletion: true
                     }],
                     template: {
-                        language: this.requestData.language || 'en',
+                        language: this.authdata.metadata.language || 'en',
                         variables: {
                             firstName: this.requestData.firstName, // Now always available
                             phone: this.requestData.phone

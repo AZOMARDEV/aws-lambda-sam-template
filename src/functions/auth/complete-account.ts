@@ -1,6 +1,6 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { connectDB } from '../../utils/dbconnect';
-import { SuccessResponse, validateRequiredFields } from '../../utils/helper';
+import { extractAuthData, ExtractedAuthData, SuccessResponse, validateRequiredFields } from '../../utils/helper';
 import { createLogger } from '../../utils/logger';
 import { parseRequestBody } from '../../utils/requestParser';
 import HttpError from '../../exception/httpError';
@@ -8,7 +8,6 @@ import { lambdaMiddleware } from '../../middleware/lambdaMiddleware';
 import bcrypt from 'bcryptjs';
 import { Account, IAccount } from '../../models/account.schema';
 import { TempAccount, ITempAccount } from '../../models/temp_account.schema';
-import { VerificationCode } from '../../models/verification_codes.schema';
 import { Session, ISession } from '../../models/sessions.schema';
 import { SQSService } from '../../utils/lambdaSqs';
 import jwt, { SignOptions } from 'jsonwebtoken';
@@ -33,21 +32,6 @@ interface CombinedAuthRequest {
     dateOfBirth?: string;
 
     gender?: 'male' | 'female' | 'other' | 'prefer_not_to_say';
-    language?: string;
-    timezone?: string;
-    country?: string;
-
-    // Device info for security
-    deviceInfo: {
-        deviceType?: 'desktop' | 'mobile' | 'tablet';
-        os: string;
-        browser: string;
-        userAgent: string;
-        fingerprint?: {
-            hash: string;
-            components: Record<string, any>;
-        };
-    };
 
     // Compliance (for new registrations)
     termsAccepted?: boolean;
@@ -61,7 +45,7 @@ interface CombinedAuthRequest {
 
 interface CombinedAuthResponseData {
     success: boolean;
-    authFlow: 'login_success' | 'registration_pending' | 'profile_completion_required' | 'requires_2fa' | 'account_locked';
+    authFlow: 'login_success';
     message: string;
 
     // Successful login data
@@ -116,9 +100,10 @@ interface CombinedAuthResponseData {
 
 class CombinedAuthBusinessHandler {
     private requestData: CombinedAuthRequest;
+    private authdata: ExtractedAuthData;
+
     private event: APIGatewayProxyEvent;
     private logger: ReturnType<typeof createLogger>;
-    private sqsservice: SQSService;
 
     // Environment variables
     private readonly SQS_QUEUE_URL: string;
@@ -133,19 +118,15 @@ class CombinedAuthBusinessHandler {
     private session?: ISession;
     private clientIP: string = '';
     private deviceLocation?: any;
-    private loginSessionId?: string;
     private isNewDevice: boolean = false;
     private securityAlerts: string[] = [];
-    private authFlow: 'login' | 'register' | 'profile_completion' | '2fa_verification' = 'login';
 
     constructor(event: APIGatewayProxyEvent, body: CombinedAuthRequest) {
         const requestId = event.requestContext?.requestId || 'unknown';
         this.event = event;
         this.requestData = body;
         this.clientIP = event.requestContext?.identity?.sourceIp || 'unknown';
-
-        // Initialize services
-        this.sqsservice = new SQSService();
+        this.authdata = extractAuthData(event.headers as Record<string, string>);
 
         // Get environment variables
         this.SQS_QUEUE_URL = process.env.SQS_QUEUE_URL || '';
@@ -169,7 +150,6 @@ class CombinedAuthBusinessHandler {
     async processRequest(): Promise<CombinedAuthResponseData> {
         this.logger.info('Starting combined auth process');
 
-
         // Step 2: Load project configuration
         await this.loadProjectConfiguration();
 
@@ -177,7 +157,6 @@ class CombinedAuthBusinessHandler {
         this.validateRequestData();
 
         return await this.handleProfileCompletion();
-
     }
 
     /**
@@ -202,7 +181,6 @@ class CombinedAuthBusinessHandler {
 
         validateRequiredFields(this.requestData, requiredFields, customMessages);
 
-
         this.logger.debug('Request validation completed');
     }
 
@@ -212,7 +190,6 @@ class CombinedAuthBusinessHandler {
             .replace(/([A-Z])/g, ' $1') // split camelCase
             .replace(/^./, str => str.toUpperCase()); // capitalize first letter
     }
-
 
     /**
      * Step 2: Load project configuration
@@ -234,7 +211,6 @@ class CombinedAuthBusinessHandler {
      * Handle profile completion for verified temp accounts
      */
     private async handleProfileCompletion(): Promise<CombinedAuthResponseData> {
-
         const tempAccount = await TempAccount.findOne({
             tempId: this.requestData.tempId,
             status: { $in: ['verified', 'partial'] }, // Only verified temp accounts can complete profile
@@ -250,21 +226,22 @@ class CombinedAuthBusinessHandler {
             tempId: this.tempAccount.tempId
         });
 
-        // Validate profile completion data
+        // Validate profile completion data with smart contact field requirements
         this.validateProfileCompletionData();
 
         if (!this.tempAccount.profile) {
             this.tempAccount.profile = {};
         }
 
-        // Now safe to set fields
+        // Update profile fields
         if (this.requestData.firstName) this.tempAccount.profile.firstName = this.requestData.firstName;
         if (this.requestData.lastName) this.tempAccount.profile.lastName = this.requestData.lastName;
         if (this.requestData.displayName) this.tempAccount.profile.displayName = this.requestData.displayName;
         if (this.requestData.dateOfBirth) this.tempAccount.profile.dateOfBirth = new Date(this.requestData.dateOfBirth);
         if (this.requestData.gender) this.tempAccount.profile.gender = this.requestData.gender;
-        if (this.requestData.country) this.tempAccount.profile.country = this.requestData.country;
 
+        // Handle contact information updates
+        await this.handleContactInformationUpdate();
 
         // Hash password if provided
         if (this.requestData.password && !this.tempAccount?.password) {
@@ -292,7 +269,7 @@ class CombinedAuthBusinessHandler {
             'profile_completed',
             'User completed profile information',
             this.clientIP,
-            this.requestData.deviceInfo.userAgent
+            this.authdata.metadata.device.userAgent
         );
 
         await this.tempAccount.save();
@@ -303,6 +280,94 @@ class CombinedAuthBusinessHandler {
 
         // Complete login directly
         return await this.completeLogin(true); // true indicates new account
+    }
+
+    /**
+     * Handle contact information updates during profile completion
+     */
+    private async handleContactInformationUpdate(): Promise<void> {
+        if (!this.tempAccount) return;
+
+        const currentEmail = this.tempAccount.email;
+        const currentPhone = this.tempAccount.phone;
+        const newEmail = this.requestData.email?.toLowerCase();
+        const newPhone = this.requestData.phone;
+
+        // Check if user is adding a new email address
+        if (newEmail && newEmail !== currentEmail) {
+            // Check if email is already used by another account
+            const existingEmailAccount = await Account.findOne({
+                email: newEmail,
+                "accountStatus.status": { $ne: "deactivated" }
+            });
+
+            if (existingEmailAccount) {
+                throw new HttpError('This email address is already registered with another account', 400);
+            }
+
+            // Check if email is used by another temp account
+            const existingEmailTempAccount = await TempAccount.findOne({
+                email: newEmail,
+                tempId: { $ne: this.tempAccount.tempId },
+                status: { $in: ['active', 'verified', 'partial'] },
+                expiresAt: { $gt: new Date() }
+            });
+
+            if (existingEmailTempAccount) {
+                throw new HttpError('This email address is already being used for another registration', 400);
+            }
+
+            this.tempAccount.email = newEmail;
+
+            // Mark email as needing verification if it's a new email
+            if (this.tempAccount.verificationRequirements?.emailVerification) {
+                this.tempAccount.verificationRequirements.emailVerification.required = true;
+                this.tempAccount.verificationRequirements.emailVerification.completed = false;
+            }
+
+            this.logger.debug('Updated temp account email', {
+                oldEmail: currentEmail,
+                newEmail: newEmail
+            });
+        }
+
+        // Check if user is adding a new phone number
+        if (newPhone && newPhone !== currentPhone) {
+            // Check if phone is already used by another account
+            const existingPhoneAccount = await Account.findOne({
+                phone: newPhone,
+                "accountStatus.status": { $ne: "deactivated" }
+            });
+
+            if (existingPhoneAccount) {
+                throw new HttpError('This phone number is already registered with another account', 400);
+            }
+
+            // Check if phone is used by another temp account
+            const existingPhoneTempAccount = await TempAccount.findOne({
+                phone: newPhone,
+                tempId: { $ne: this.tempAccount.tempId },
+                status: { $in: ['active', 'verified', 'partial'] },
+                expiresAt: { $gt: new Date() }
+            });
+
+            if (existingPhoneTempAccount) {
+                throw new HttpError('This phone number is already being used for another registration', 400);
+            }
+
+            this.tempAccount.phone = newPhone;
+
+            // Mark phone as needing verification if it's a new phone
+            if (this.tempAccount.verificationRequirements?.phoneVerification) {
+                this.tempAccount.verificationRequirements.phoneVerification.required = true;
+                this.tempAccount.verificationRequirements.phoneVerification.completed = false;
+            }
+
+            this.logger.debug('Updated temp account phone', {
+                oldPhone: currentPhone,
+                newPhone: newPhone
+            });
+        }
     }
 
     /**
@@ -328,15 +393,15 @@ class CombinedAuthBusinessHandler {
         this.account.security.loginHistory.push({
             timestamp: new Date(),
             ip: this.clientIP,
-            userAgent: this.requestData.deviceInfo.userAgent,
-            deviceId: this.requestData.deviceInfo.fingerprint?.hash,
+            userAgent: this.authdata.metadata.device.userAgent,
+            deviceId: this.authdata.metadata.device.deviceId,
             success: true,
             location: this.deviceLocation
         });
 
         // Manage trusted devices
-        if (this.isNewDevice && this.requestData.deviceInfo.fingerprint?.hash) {
-            this.account.security.trustedDevices.push(this.requestData.deviceInfo.fingerprint.hash);
+        if (this.isNewDevice && this.authdata.metadata.device.deviceId) {
+            this.account.security.trustedDevices.push(this.authdata.metadata.device.deviceId);
             if (this.account.security.trustedDevices.length > 10) {
                 this.account.security.trustedDevices = this.account.security.trustedDevices.slice(-10);
             }
@@ -364,9 +429,12 @@ class CombinedAuthBusinessHandler {
             sessionId: this.session?.sessionId,
             accountId: String(this.account._id),
             profile: {
-                ...this.account.profile,
+                firstName: this.account.profile.firstName,
+                lastName: this.account.profile.lastName,
+                displayName: this.account.profile.displayName,
                 isComplete: profileCompletion.isComplete,
-                completionPercentage: profileCompletion.percentage
+                avatar: this.account.profile.profilePicture?.url,
+                completionPercentage: profileCompletion.percentage,
             },
             lastLogin: this.account.lastLogin,
             newDevice: this.isNewDevice,
@@ -379,6 +447,11 @@ class CombinedAuthBusinessHandler {
     // ==================== HELPER METHODS ====================
 
     private validateProfileCompletionData(): void {
+        if (!this.tempAccount) {
+            throw new HttpError('Temp account not found', 500);
+        }
+
+        // Basic required fields
         if (!this.requestData.firstName || !this.requestData.lastName) {
             throw new HttpError('First name and last name are required to complete profile', 400);
         }
@@ -386,8 +459,56 @@ class CombinedAuthBusinessHandler {
         if (!this.requestData.termsAccepted || !this.requestData.privacyPolicyAccepted) {
             throw new HttpError('You must accept the terms and privacy policy to complete registration', 400);
         }
-    }
 
+        // Smart contact field validation
+        const hasCurrentEmail = !!this.tempAccount.email;
+        const hasCurrentPhone = !!this.tempAccount.phone;
+        const isEmailVerified = this.tempAccount.verificationRequirements?.emailVerification?.completed || false;
+        const isPhoneVerified = this.tempAccount.verificationRequirements?.phoneVerification?.completed || false;
+
+        const providedEmail = !!this.requestData.email;
+        const providedPhone = !!this.requestData.phone;
+
+        // If user has email but not phone, phone becomes optional
+        if (hasCurrentEmail && isEmailVerified && !hasCurrentPhone) {
+            // Phone is optional, no validation needed for phone
+            this.logger.debug('Email verified, phone is optional');
+            return;
+        }
+
+        // If user has phone but not email, email becomes optional  
+        if (hasCurrentPhone && isPhoneVerified && !hasCurrentEmail) {
+            // Email is optional, no validation needed for email
+            this.logger.debug('Phone verified, email is optional');
+            return;
+        }
+
+        // If user has both email and phone, both are validated during registration
+        if (hasCurrentEmail && hasCurrentPhone) {
+            if (!isEmailVerified && !isPhoneVerified) {
+                throw new HttpError('At least one contact method (email or phone) must be verified', 400);
+            }
+            this.logger.debug('User has both contact methods');
+            return;
+        }
+
+        // If user doesn't have either contact method, they must provide at least one
+        if (!hasCurrentEmail && !hasCurrentPhone) {
+            if (!providedEmail && !providedPhone) {
+                throw new HttpError('At least one contact method (email or phone) is required', 400);
+            }
+        }
+
+        // If user only has unverified email, they must provide phone or verify email
+        if (hasCurrentEmail && !isEmailVerified && !hasCurrentPhone && !providedPhone) {
+            throw new HttpError('Phone number is required since email is not verified', 400);
+        }
+
+        // If user only has unverified phone, they must provide email or verify phone  
+        if (hasCurrentPhone && !isPhoneVerified && !hasCurrentEmail && !providedEmail) {
+            throw new HttpError('Email address is required since phone is not verified', 400);
+        }
+    }
 
     private async convertTempToRealAccount(): Promise<IAccount> {
         if (!this.tempAccount) throw new HttpError('Temp account not found', 500);
@@ -395,6 +516,10 @@ class CombinedAuthBusinessHandler {
         this.logger.debug('Converting temp account to real account', {
             tempId: this.tempAccount.tempId
         });
+
+        // Set verification status based on temp account verification
+        const emailVerified = this.tempAccount.verificationRequirements?.emailVerification?.completed || false;
+        const phoneVerified = this.tempAccount.verificationRequirements?.phoneVerification?.completed || false;
 
         const accountData = {
             email: this.tempAccount.email,
@@ -404,19 +529,30 @@ class CombinedAuthBusinessHandler {
             profile: this.tempAccount.profile,
             accountStatus: {
                 status: 'active',
-                isComplete: false,
                 verificationLevel: 'basic',
-                lastActive: new Date(),
                 registrationDate: new Date(),
                 accountType: 'standard',
                 membershipTier: 'basic',
-                strikeCount: 0,
+                isComplete: true,
+                lastActive: new Date(),
                 statusHistory: [{
                     status: 'active',
                     reason: 'Account created',
                     timestamp: new Date(),
                     changedBy: 'system'
                 }]
+            },
+            verification: {
+                email: {
+                    isVerified: emailVerified,
+                    verifiedAt: emailVerified ? new Date() : undefined,
+                    verificationMethod: emailVerified ? 'otp' : undefined
+                },
+                phone: {
+                    isVerified: phoneVerified,
+                    verifiedAt: phoneVerified ? new Date() : undefined,
+                    verificationMethod: phoneVerified ? 'sms' : undefined
+                }
             },
             security: {
                 failedLoginAttempts: 0,
@@ -452,13 +588,15 @@ class CombinedAuthBusinessHandler {
             'converted_to_account',
             `Temp account converted to real account: ${newAccount._id}`,
             this.clientIP,
-            this.requestData.deviceInfo.userAgent
+            this.authdata.metadata.device.userAgent
         );
         await this.tempAccount.save();
 
         this.logger.info('Temp account converted to real account', {
             tempId: this.tempAccount.tempId,
-            accountId: newAccount._id
+            accountId: newAccount._id,
+            emailVerified,
+            phoneVerified
         });
 
         return newAccount;
@@ -495,11 +633,11 @@ class CombinedAuthBusinessHandler {
         this.session = new Session({
             accountId: this.account._id,
             deviceInfo: {
-                deviceId: this.requestData.deviceInfo.fingerprint?.hash,
-                deviceType: this.requestData.deviceInfo.deviceType || 'unknown',
-                os: this.requestData.deviceInfo.os,
-                browser: this.requestData.deviceInfo.browser,
-                userAgent: this.requestData.deviceInfo.userAgent,
+                deviceId: this.authdata.metadata.device.deviceId,
+                deviceType: this.authdata.metadata.device.type || 'unknown',
+                os: this.authdata.metadata.device.os,
+                browser: this.authdata.metadata.device.browser,
+                userAgent: this.authdata.metadata.device.userAgent,
             },
             location: {
                 ip: this.clientIP,
@@ -529,9 +667,9 @@ class CombinedAuthBusinessHandler {
             metadata: {
                 loginMethod: 'combined_auth',
                 browserInfo: {
-                    userAgent: this.requestData.deviceInfo.userAgent,
-                    browser: this.requestData.deviceInfo.browser,
-                    os: this.requestData.deviceInfo.os
+                    userAgent: this.authdata.metadata.device.userAgent,
+                    browser: this.authdata.metadata.device.browser,
+                    os: this.authdata.metadata.device.os
                 },
                 newDevice: this.isNewDevice
             }
@@ -542,7 +680,7 @@ class CombinedAuthBusinessHandler {
             endpoint: this.event.path,
             method: this.event.httpMethod,
             statusCode: 200,
-            userAgent: this.requestData.deviceInfo.userAgent,
+            userAgent: this.authdata.metadata.device.userAgent,
             ip: this.clientIP
         });
 
@@ -686,3 +824,4 @@ export const handler = lambdaMiddleware(CombinedAuthHandler, {
     enablePerformanceLogging: true,
     logLevel: 'info'
 });
+

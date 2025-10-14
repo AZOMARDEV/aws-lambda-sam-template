@@ -1,6 +1,6 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { connectDB } from '../../utils/dbconnect';
-import { SuccessResponse } from '../../utils/helper';
+import { extractAuthData, ExtractedAuthData, SuccessResponse } from '../../utils/helper';
 import { createLogger } from '../../utils/logger';
 import { parseRequestBody } from '../../utils/requestParser';
 import HttpError from '../../exception/httpError';
@@ -22,18 +22,6 @@ interface LoginRequest {
 
     // Password (required for initial auth unless 2FA step)
     password: string;
-
-    // Device info for security
-    deviceInfo: {
-        deviceType?: 'desktop' | 'mobile' | 'tablet';
-        os: string;
-        browser: string;
-        userAgent: string;
-        fingerprint?: {
-            hash: string;
-            components: Record<string, any>;
-        };
-    };
 
     // Optional remember me
     rememberMe?: boolean;
@@ -78,6 +66,7 @@ interface LoginResponseData {
 
 class LoginBusinessHandler {
     private requestData: LoginRequest;
+    private authdata: ExtractedAuthData;
     private event: APIGatewayProxyEvent;
     private logger: ReturnType<typeof createLogger>;
     private sqsservice: SQSService;
@@ -103,6 +92,7 @@ class LoginBusinessHandler {
         this.event = event;
         this.requestData = body;
         this.clientIP = event.requestContext?.identity?.sourceIp || 'unknown';
+        this.authdata = extractAuthData(event.headers as Record<string, string>);
 
         // Initialize services
         this.sqsservice = new SQSService();
@@ -347,8 +337,8 @@ class LoginBusinessHandler {
         const loginEntry = {
             timestamp: new Date(),
             ip: this.clientIP,
-            userAgent: this.requestData.deviceInfo.userAgent,
-            deviceId: this.requestData.deviceInfo.fingerprint?.hash,
+            userAgent: this.authdata.metadata.device.userAgent,
+            deviceId: this.authdata.metadata.device.deviceId,
             success: true,
             location: this.deviceLocation
         };
@@ -374,8 +364,8 @@ class LoginBusinessHandler {
         }
 
         // Add device to trusted devices if new and successful
-        if (this.isNewDevice && this.requestData.deviceInfo.fingerprint?.hash) {
-            this.account.security.trustedDevices.push(this.requestData.deviceInfo.fingerprint.hash);
+        if (this.isNewDevice && this.authdata.metadata.device.deviceId) {
+            this.account.security.trustedDevices.push(this.authdata.metadata.device.deviceId);
             // Keep only last 10 trusted devices
             if (this.account.security.trustedDevices.length > 10) {
                 this.account.security.trustedDevices = this.account.security.trustedDevices.slice(-10);
@@ -450,11 +440,11 @@ class LoginBusinessHandler {
         this.session = new Session({
             accountId: this.account._id,
             deviceInfo: {
-                deviceId: this.requestData.deviceInfo.fingerprint?.hash,
-                deviceType: this.requestData.deviceInfo.deviceType || 'unknown',
-                os: this.requestData.deviceInfo.os,
-                browser: this.requestData.deviceInfo.browser,
-                userAgent: this.requestData.deviceInfo.userAgent,
+                deviceId: this.authdata.metadata.device.deviceId,
+                deviceType: this.authdata.metadata.device.type || 'unknown',
+                os: this.authdata.metadata.device.os,
+                browser: this.authdata.metadata.device.browser,
+                userAgent: this.authdata.metadata.device.userAgent,
             },
             location: {
                 ip: this.clientIP,
@@ -489,9 +479,9 @@ class LoginBusinessHandler {
             metadata: {
                 loginMethod: this.project?.settings?.mfa.enabled ? '2fa' : 'password',
                 browserInfo: {
-                    userAgent: this.requestData.deviceInfo.userAgent,
-                    browser: this.requestData.deviceInfo.browser,
-                    os: this.requestData.deviceInfo.os
+                    userAgent: this.authdata.metadata.device.userAgent,
+                    browser: this.authdata.metadata.device.browser,
+                    os: this.authdata.metadata.device.os
                 },
                 newDevice: this.isNewDevice
             }
@@ -503,7 +493,7 @@ class LoginBusinessHandler {
             endpoint: this.event.path,
             method: this.event.httpMethod,
             statusCode: 200,
-            userAgent: this.requestData.deviceInfo.userAgent,
+            userAgent: this.authdata.metadata.device.userAgent,
             ip: this.clientIP
         });
 
@@ -538,8 +528,8 @@ class LoginBusinessHandler {
         this.account.security.loginHistory.push({
             timestamp: new Date(),
             ip: this.clientIP,
-            userAgent: this.requestData.deviceInfo.userAgent,
-            deviceId: this.requestData.deviceInfo.fingerprint?.hash,
+            userAgent: this.authdata.metadata.device.userAgent,
+            deviceId: this.authdata.metadata.device.deviceId,
             success: false,
             location: this.deviceLocation
         });
@@ -569,7 +559,7 @@ class LoginBusinessHandler {
                         name: this.account!.profile.firstName || 'User',
                         expiryMinutes: 3,
                         location: this.deviceLocation?.country || 'Unknown',
-                        device: this.requestData.deviceInfo.os,
+                        device: this.authdata.metadata.device.os,
                         email: this.account!.email,
 
                         // Additional placeholders
@@ -577,7 +567,7 @@ class LoginBusinessHandler {
                         login_time: new Date().toISOString(),
                         ip_address: this.clientIP,
                         location_info: this.deviceLocation?.country || 'Unknown',
-                        device_info: `${this.requestData.deviceInfo.browser} on ${this.requestData.deviceInfo.os}`,
+                        device_info: `${this.authdata.metadata.device.browser} on ${this.authdata.metadata.device.os}`,
                         user_email: this.account!.email || 'Unknown',
                         login_url: `${process.env.APP_URL}/login`,
                         help_url: `${process.env.APP_URL}/help`,

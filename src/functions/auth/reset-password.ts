@@ -1,6 +1,6 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { connectDB } from '../../utils/dbconnect';
-import { SuccessResponse, validateRequiredFields } from '../../utils/helper';
+import { extractAuthData, ExtractedAuthData, SuccessResponse, validateRequiredFields } from '../../utils/helper';
 import { createLogger } from '../../utils/logger';
 import { parseRequestBody } from '../../utils/requestParser';
 import HttpError from '../../exception/httpError';
@@ -23,18 +23,6 @@ interface ResetPasswordRequest {
     // New password
     newPassword: string;
     confirmPassword: string;
-
-    // Device info for security
-    deviceInfo: {
-        deviceType?: 'desktop' | 'mobile' | 'tablet';
-        os: string;
-        browser: string;
-        userAgent: string;
-        fingerprint?: {
-            hash: string;
-            components: Record<string, any>;
-        };
-    };
 
     // Optional: Invalidate all existing sessions
     invalidateAllSessions?: boolean;
@@ -63,9 +51,9 @@ interface ResetPasswordResponseData {
 
 class ResetPasswordBusinessHandler {
     private requestData: ResetPasswordRequest;
+    private authdata: ExtractedAuthData;
     private event: APIGatewayProxyEvent;
     private logger: ReturnType<typeof createLogger>;
-    private sqsservice: SQSService;
 
     // Environment variables
     private readonly SQS_QUEUE_URL: string;
@@ -83,9 +71,7 @@ class ResetPasswordBusinessHandler {
         this.event = event;
         this.requestData = body;
         this.clientIP = event.requestContext?.identity?.sourceIp || 'unknown';
-
-        // Initialize services
-        this.sqsservice = new SQSService();
+        this.authdata = extractAuthData(event.headers as Record<string, string>);
 
         // Get environment variables
         this.SQS_QUEUE_URL = process.env.SQS_QUEUE_URL || '';
@@ -140,7 +126,7 @@ class ResetPasswordBusinessHandler {
         }
 
         // Device info validation
-        if (!this.requestData.deviceInfo?.os || !this.requestData.deviceInfo?.browser) {
+        if (!this.authdata.metadata.device.os || !this.authdata.metadata.device.browser) {
             throw new HttpError('Device information is required for security purposes', 400);
         }
 

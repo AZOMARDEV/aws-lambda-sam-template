@@ -1,38 +1,23 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { connectDB } from '../../utils/dbconnect';
-import { SuccessResponse, validateRequiredFields } from '../../utils/helper';
+import { extractAuthData, ExtractedAuthData, SuccessResponse, validateRequiredFields } from '../../utils/helper';
 import { createLogger } from '../../utils/logger';
 import { parseRequestBody } from '../../utils/requestParser';
 import HttpError from '../../exception/httpError';
 import { lambdaMiddleware } from '../../middleware/lambdaMiddleware';
 import { Account, IAccount } from '../../models/account.schema';
 import { Session, ISession } from '../../models/sessions.schema';
-import { SQSService } from '../../utils/lambdaSqs';
 import jwt from 'jsonwebtoken';
 
 // ==================== INTERFACES ====================
 
 interface LogoutRequest {
-    // Token to logout (either access or refresh)
-    token?: string;
 
     // Specific session to logout
     sessionId?: string;
 
     // Logout type
     logoutType?: 'current' | 'all_sessions' | 'all_other_sessions';
-
-    // Device info for security logging
-    deviceInfo?: {
-        deviceType?: 'desktop' | 'mobile' | 'tablet';
-        os?: string;
-        browser?: string;
-        userAgent: string;
-        fingerprint?: {
-            hash: string;
-            components: Record<string, any>;
-        };
-    };
 
     // Reason for logout (optional)
     reason?: 'user_initiated' | 'security' | 'admin' | 'session_timeout' | 'password_change';
@@ -62,9 +47,10 @@ interface LogoutResponseData {
 
 class LogoutBusinessHandler {
     private requestData: LogoutRequest;
+    private authdata: ExtractedAuthData;
+
     private event: APIGatewayProxyEvent;
     private logger: ReturnType<typeof createLogger>;
-    private sqsservice: SQSService;
 
     // Environment variables
     private readonly JWT_SECRET: string;
@@ -82,9 +68,7 @@ class LogoutBusinessHandler {
         this.event = event;
         this.requestData = body;
         this.clientIP = event.requestContext?.identity?.sourceIp || 'unknown';
-
-        // Initialize services
-        this.sqsservice = new SQSService();
+        this.authdata = extractAuthData(event.headers as Record<string, string>);
 
         // Get environment variables
         this.JWT_SECRET = process.env.JWT_SECRET || '';
@@ -130,7 +114,7 @@ class LogoutBusinessHandler {
         this.logger.debug('Validating logout request data');
 
         // At least token or sessionId required
-        if (!this.requestData.token && !this.requestData.sessionId) {
+        if (!this.authdata.authorization && !this.requestData.sessionId) {
             throw new HttpError('Token or sessionId is required for logout', 400);
         }
 
@@ -165,7 +149,7 @@ class LogoutBusinessHandler {
     private async extractAccountInformation(): Promise<void> {
         this.logger.debug('Extracting account information');
 
-        if (this.requestData.token) {
+        if (this.authdata.authorization) {
             await this.decodeToken();
         } else if (this.requestData.sessionId) {
             await this.findSessionById();
@@ -184,11 +168,11 @@ class LogoutBusinessHandler {
      * Decode token to get account information
      */
     private async decodeToken(): Promise<void> {
-        if (!this.requestData.token) return;
+        if (!this.authdata.authorization) return;
 
         try {
             // Try as access token first
-            this.decodedToken = jwt.verify(this.requestData.token, this.JWT_SECRET);
+            this.decodedToken = jwt.verify(this.authdata.authorization, this.JWT_SECRET);
             this.accountId = this.decodedToken.accountId;
 
             this.logger.debug('Token decoded as access token', {
@@ -199,7 +183,7 @@ class LogoutBusinessHandler {
         } catch (accessTokenError) {
             try {
                 // Try as refresh token
-                this.decodedToken = jwt.verify(this.requestData.token, this.REFRESH_TOKEN_SECRET);
+                this.decodedToken = jwt.verify(this.authdata.authorization, this.REFRESH_TOKEN_SECRET);
                 this.accountId = this.decodedToken.accountId;
 
                 this.logger.debug('Token decoded as refresh token', {
@@ -211,7 +195,7 @@ class LogoutBusinessHandler {
                 // Token might be expired or invalid, but we can still try to extract accountId
                 try {
                     // Decode without verification to get accountId
-                    const decoded = jwt.decode(this.requestData.token) as any;
+                    const decoded = jwt.decode(this.authdata.authorization) as any;
                     if (decoded && decoded.accountId) {
                         this.accountId = decoded.accountId;
                         this.logger.warn('Used expired/invalid token for logout - extracted accountId', {
@@ -376,7 +360,7 @@ class LogoutBusinessHandler {
             } else {
                 // Find session by access token
                 session = await Session.findOne({
-                    accessToken: this.requestData.token,
+                    accessToken: this.authdata.authorization,
                     accountId: this.accountId,
                     isActive: true
                 });
@@ -398,7 +382,7 @@ class LogoutBusinessHandler {
             endpoint: this.event.path,
             method: this.event.httpMethod,
             statusCode: 200,
-            userAgent: this.requestData.deviceInfo?.userAgent || 'unknown',
+            userAgent: this.authdata.metadata.device.userAgent || 'unknown',
             ip: this.clientIP,
             timestamp: new Date()
         });
@@ -468,7 +452,7 @@ class LogoutBusinessHandler {
                 endpoint: this.event.path,
                 method: this.event.httpMethod,
                 statusCode: 200,
-                userAgent: this.requestData.deviceInfo?.userAgent || 'unknown',
+                userAgent: this.authdata.metadata.device.userAgent || 'unknown',
                 ip: this.clientIP,
                 timestamp: new Date()
             });
@@ -517,10 +501,10 @@ class LogoutBusinessHandler {
             currentSessionId = this.decodedToken.sessionId;
         }
 
-        if (!currentSessionId && this.requestData.token) {
+        if (!currentSessionId && this.authdata.authorization) {
             // Try to find session by access token
             const currentSession = await Session.findOne({
-                accessToken: this.requestData.token,
+                accessToken: this.authdata.authorization,
                 accountId: this.accountId,
                 isActive: true
             });
@@ -564,7 +548,7 @@ class LogoutBusinessHandler {
                 endpoint: this.event.path,
                 method: this.event.httpMethod,
                 statusCode: 200,
-                userAgent: this.requestData.deviceInfo?.userAgent || 'unknown',
+                userAgent: this.authdata.metadata.device.userAgent || 'unknown',
                 ip: this.clientIP,
                 timestamp: new Date()
             });
@@ -621,6 +605,8 @@ class LogoutBusinessHandler {
 const LogoutHandler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
     const requestId = event.requestContext?.requestId || 'unknown';
     const logger = createLogger('auth-service', requestId);
+
+    console.log(event);
 
     logger.appendPersistentKeys({
         httpMethod: event.httpMethod,

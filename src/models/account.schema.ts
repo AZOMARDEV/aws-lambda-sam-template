@@ -83,6 +83,27 @@ interface IAddress {
   verified?: boolean;
 }
 
+interface IStatusHistory {
+  status: 'active' | 'deactivated' | 'suspended' | 'banned' | 'pending_verification';
+  reason: string;
+  timestamp: Date;
+  changedBy: string;
+}
+
+interface IAccountStatus {
+  status: 'active' | 'deactivated' | 'suspended' | 'banned' | 'pending_verification';
+  statusReason?: string;
+  lastStatusChange?: Date;
+  statusHistory?: IStatusHistory[];
+  isComplete?: boolean;
+  verificationLevel: string;
+  lastActive?: Date;
+  registrationDate: Date;
+  accountType: string;
+  membershipTier: string;
+  strikeCount?: number;
+}
+
 export interface IAccount extends Document {
   email?: string;
   phone?: string;
@@ -94,16 +115,7 @@ export interface IAccount extends Document {
   security: ISecurity;
   isEmailVerified: boolean;
   isPhoneVerified: boolean;
-  accountStatus: {
-    status: 'active' | 'deactivated' | 'suspended' | 'banned' | 'pending_verification';
-    isComplete?: boolean;
-    verificationLevel: string;
-    lastActive?: Date;
-    registrationDate: Date;
-    accountType: string;
-    membershipTier: string;
-    strikeCount?: number;
-  };
+  accountStatus: IAccountStatus;
   lastLogin?: Date;
   loginCount: number;
   createdAt: Date;
@@ -275,6 +287,28 @@ const AccountSchema = new Schema<IAccount>({
       enum: ['pending_verification', 'active', 'suspended', 'banned'],
       index: true
     },
+    statusReason: {
+      type: String
+    },
+    lastStatusChange: {
+      type: Date,
+      default: Date.now
+    },
+    statusHistory: [{
+      status: {
+        type: String,
+        enum: ['pending_verification', 'active', 'suspended', 'banned']
+      },
+      reason: String,
+      timestamp: {
+        type: Date,
+        default: Date.now
+      },
+      changedBy: {
+        type: String,
+        default: 'system'
+      }
+    }],
     isComplete: {
       type: Boolean,
       default: true,

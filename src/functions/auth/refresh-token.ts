@@ -1,6 +1,6 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { connectDB } from '../../utils/dbconnect';
-import { SuccessResponse, validateRequiredFields } from '../../utils/helper';
+import { extractAuthData, ExtractedAuthData, SuccessResponse, validateRequiredFields } from '../../utils/helper';
 import { createLogger } from '../../utils/logger';
 import { parseRequestBody } from '../../utils/requestParser';
 import HttpError from '../../exception/httpError';
@@ -13,18 +13,6 @@ import jwt, { SignOptions } from 'jsonwebtoken';
 
 interface RefreshTokenRequest {
     refreshToken: string;
-
-    // Device info for security validation
-    deviceInfo: {
-        deviceType?: 'desktop' | 'mobile' | 'tablet';
-        os: string;
-        browser: string;
-        userAgent: string;
-        fingerprint?: {
-            hash: string;
-            components: Record<string, any>;
-        };
-    };
 
     // Optional session context
     sessionId?: string;
@@ -57,6 +45,7 @@ interface RefreshTokenResponseData {
 
 class RefreshTokenBusinessHandler {
     private requestData: RefreshTokenRequest;
+    private authdata: ExtractedAuthData;
     private event: APIGatewayProxyEvent;
     private logger: ReturnType<typeof createLogger>;
 
@@ -78,7 +67,7 @@ class RefreshTokenBusinessHandler {
         this.event = event;
         this.requestData = body;
         this.clientIP = event.requestContext?.identity?.sourceIp || 'unknown';
-
+        this.authdata = extractAuthData(event.headers as Record<string, string>);
         // Get environment variables
         this.JWT_SECRET = process.env.JWT_SECRET || '';
         this.JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '24h';
@@ -133,7 +122,7 @@ class RefreshTokenBusinessHandler {
         }
 
         // Device info validation
-        if (!this.requestData.deviceInfo?.os || !this.requestData.deviceInfo?.browser) {
+        if (!this.authdata.metadata.device.os || !this.authdata.metadata.device.browser) {
             throw new HttpError('Device information is required for security purposes', 400);
         }
 
@@ -299,15 +288,10 @@ class RefreshTokenBusinessHandler {
 
         // Check if device characteristics have changed significantly
         const sessionDevice = this.session.deviceInfo;
-        const currentDevice = this.requestData.deviceInfo;
+        const currentDevice = this.authdata.metadata.device;
 
-        if (sessionDevice.userAgent !== currentDevice.userAgent) {
-            this.deviceChanged = true;
-            this.securityAlerts.push('User agent changed');
-        }
-
-        if (sessionDevice.deviceId && currentDevice.fingerprint?.hash &&
-            sessionDevice.deviceId !== currentDevice.fingerprint.hash) {
+        if (sessionDevice.deviceId && currentDevice.deviceId &&
+            sessionDevice.deviceId !== currentDevice.deviceId) {
             this.deviceChanged = true;
             this.securityAlerts.push('Device fingerprint changed');
         }
@@ -391,7 +375,7 @@ class RefreshTokenBusinessHandler {
             endpoint: this.event.path,
             method: this.event.httpMethod,
             statusCode: 200,
-            userAgent: this.requestData.deviceInfo.userAgent,
+            userAgent: this.authdata.metadata.device.userAgent || 'unknown',
             ip: this.clientIP,
             timestamp: new Date(),
         });

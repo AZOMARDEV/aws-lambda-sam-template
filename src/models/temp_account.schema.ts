@@ -79,10 +79,6 @@ export interface IDeviceInfo {
     latitude?: number;
     longitude?: number;
   };
-  fingerprint?: {
-    hash: string;
-    components: Record<string, any>;
-  };
 }
 
 export interface ISecurityCheck {
@@ -313,11 +309,6 @@ const LocationSchema = new Schema({
   longitude: Number
 }, { _id: false });
 
-const FingerprintSchema = new Schema({
-  hash: { type: String, required: true },
-  components: { type: Schema.Types.Mixed, default: {} }
-}, { _id: false });
-
 const DeviceInfoSchema = new Schema<IDeviceInfo>({
   deviceId: String,
   deviceType: {
@@ -330,7 +321,6 @@ const DeviceInfoSchema = new Schema<IDeviceInfo>({
   userAgent: { type: String, required: true },
   ip: { type: String, required: true },
   location: LocationSchema,
-  fingerprint: FingerprintSchema
 }, { _id: false });
 
 const SecurityChecksSchema = new Schema({

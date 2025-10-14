@@ -1,6 +1,6 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { connectDB } from '../../utils/dbconnect';
-import { SuccessResponse, validateRequiredFields } from '../../utils/helper';
+import { extractAuthData, ExtractedAuthData, SuccessResponse, validateRequiredFields } from '../../utils/helper';
 import { createLogger } from '../../utils/logger';
 import { parseRequestBody } from '../../utils/requestParser';
 import HttpError from '../../exception/httpError';
@@ -28,18 +28,6 @@ interface ResendCodeRequest {
 
     // For MFA method preference
     preferredMfaMethod?: 'sms' | 'email' | 'totp';
-
-    // Device and context info
-    deviceInfo?: {
-        userAgent: string;
-        os?: string;
-        browser?: string;
-        deviceId?: string;
-    };
-
-    // Captcha for rate limiting protection
-    captchaToken?: string;
-    captchaProvider?: 'recaptcha' | 'hcaptcha' | 'cloudflare';
 }
 
 interface ResendCodeResponseData {
@@ -58,6 +46,7 @@ interface ResendCodeResponseData {
 
 class ResendCodeBusinessHandler {
     private requestData: ResendCodeRequest;
+    private authdata: ExtractedAuthData;
     private event: APIGatewayProxyEvent;
     private logger: ReturnType<typeof createLogger>;
     private sqsService: SQSService;
@@ -68,7 +57,7 @@ class ResendCodeBusinessHandler {
     // Data holders
     private account?: IAccount;
     private tempAccount?: ITempAccount;
-    private existingCode: IVerificationCode | null = null;
+    private existingCode?: IVerificationCode;
     private clientIP: string = '';
     private deviceLocation?: any;
     private isTemporaryAccount: boolean = false;
@@ -83,6 +72,7 @@ class ResendCodeBusinessHandler {
         this.event = event;
         this.requestData = body;
         this.clientIP = event.requestContext?.identity?.sourceIp || 'unknown';
+        this.authdata = extractAuthData(event.headers as Record<string, string>);
 
         // Initialize services
         this.sqsService = new SQSService();
@@ -302,44 +292,50 @@ class ResendCodeBusinessHandler {
      * Step 4: Find existing verification code
      */
     private async findExistingCode(): Promise<void> {
-        this.logger.debug('Finding existing verification code');
+        this.logger.debug('Finding existing verification code for metadata');
 
         let query: any = {
-            type: this.requestData.verificationType,
             status: 'active',
-            expiresAt: { $gt: new Date() }
+            // expiresAt: { $gt: new Date() }
         };
 
         // Special handling for MFA resend
-        if (this.requestData.verificationType === 'mfa' && this.requestData.loginSessionId) {
+        if (this.requestData.loginSessionId) {
             query['context.metadata.loginSessionId'] = this.requestData.loginSessionId;
-        } else if (this.account) {
-            query.accountId = this.account._id;
-        } else if (this.tempAccount) {
-            query.tempAccountId = this.tempAccount._id;
-        } else {
-            // For codes without account (shouldn't happen after findAccount)
-            query.$or = [];
-            if (this.requestData.email) {
-                query.$or.push({ 'deliveryInfo.recipient': this.requestData.email });
-            }
-            if (this.requestData.phone) {
-                query.$or.push({ 'deliveryInfo.recipient': this.requestData.phone });
-            }
         }
+        // else if (this.account) {
+        //     query.accountId = this.account._id;
+        // } else if (this.tempAccount) {
+        //     query.tempAccountId = this.tempAccount._id;
+        // } else {
+        //     // For codes without account
+        //     query.$or = [];
+        //     if (this.requestData.email) {
+        //         query.$or.push({ 'deliveryInfo.recipient': this.requestData.email });
+        //     }
+        //     if (this.requestData.phone) {
+        //         query.$or.push({ 'deliveryInfo.recipient': this.requestData.phone });
+        //     }
+        // }
 
-        this.existingCode = await VerificationCode.findOne(query).sort({ createdAt: -1 });
+        const existingCodeData = await VerificationCode.findOne(query).sort({ createdAt: -1 });
+
+        if (!existingCodeData) {
+            throw new HttpError('No active verification code found', 404);
+        }
+        this.existingCode = existingCodeData;
 
         this.logger.debug('Existing code search completed', {
             foundExisting: !!this.existingCode,
             existingCodeId: this.existingCode?.codeId,
-            isTemporaryAccount: this.isTemporaryAccount
+            isTemporaryAccount: this.isTemporaryAccount,
+            note: 'This code will be deactivated during new code creation'
         });
     }
 
     /**
-     * Step 5: Create new verification code
-     */
+         * Step 5: Create new verification code
+         */
     private async createNewVerificationCode(): Promise<IVerificationCode> {
         this.logger.debug('Creating new verification code');
 
@@ -351,27 +347,26 @@ class ResendCodeBusinessHandler {
         const newCodeValue = VerificationCode.generateCode(codeLength);
         const hashedCode = VerificationCode.hashCode(newCodeValue);
 
-        // Revoke existing active codes
-        if (this.existingCode) {
-            this.existingCode.revoke('superseded_by_resend', this.account?.id || this.tempAccount?.id);
-            await this.existingCode.save();
-        }
+        // ENHANCED: Deactivate ALL existing active codes for this verification type and account
+        await this.deactivateExistingCodes();
 
         // Get user name for template
         const userName = this.account?.profile?.firstName ||
             this.tempAccount?.profile?.firstName ||
             'User';
 
+        console.log("purpose", this.existingCode?.purpose);
+
         // Create new verification code
         const newCodeData: any = {
             code: newCodeValue,
             hashedCode,
             type: this.requestData.verificationType,
-            purpose: this.getPurposeDescription(),
+            purpose: this.existingCode?.purpose,
             method,
             deliveryInfo: {
                 channel: method,
-                provider: method === 'sms' ? 'twilio' : 'ses',
+                provider: method === 'sms' ? 'twilio' : 'brevo',
                 recipient,
                 deliveryStatus: 'pending'
             },
@@ -388,9 +383,9 @@ class ResendCodeBusinessHandler {
                     loginSessionId: this.requestData.loginSessionId
                 },
                 sessionId: this.event.requestContext?.requestId,
-                deviceId: this.requestData.deviceInfo?.deviceId,
+                deviceId: this.authdata.metadata.device.deviceId,
                 ip: this.clientIP,
-                userAgent: this.requestData.deviceInfo?.userAgent || this.event.headers?.['User-Agent']
+                userAgent: this.authdata.metadata.device.userAgent || this.event.headers?.['User-Agent']
             },
             security: {
                 requiresSecureChannel: true,
@@ -422,7 +417,7 @@ class ResendCodeBusinessHandler {
         const newCode = new VerificationCode(newCodeData);
         await newCode.save();
 
-        this.logger.info('New verification code created', {
+        this.logger.info('New verification code created and previous codes deactivated', {
             codeId: newCode.codeId,
             method,
             recipient: this.maskRecipient(recipient),
@@ -433,6 +428,67 @@ class ResendCodeBusinessHandler {
 
         return newCode;
     }
+
+    /**
+     * NEW METHOD: Deactivate all existing active codes for this verification type and account
+     */
+    private async deactivateExistingCodes(): Promise<void> {
+        this.logger.debug('Deactivating existing verification codes');
+
+        try {
+            // Build query to find all active codes for this account and verification type
+            let deactivationQuery: any = {
+                status: { $in: ['active', 'pending'] }, // Include both active and pending codes
+            };
+
+            // Special handling for MFA with login session
+            deactivationQuery['context.metadata.loginSessionId'] = this.requestData.loginSessionId;
+            // Find all matching active codes
+            const existingCodes = await VerificationCode.find(deactivationQuery);
+
+            if (existingCodes.length > 0) {
+                this.logger.debug(`Found ${existingCodes.length} existing codes to deactivate`);
+
+                const bulkUpdateResult = await VerificationCode.updateMany(
+                    deactivationQuery,
+                    {
+                        $set: {
+                            status: 'revoked',
+                            revokedAt: new Date(),
+                            revokedBy: this.account?.id || this.tempAccount?.id,
+                            revocationReason: 'superseded_by_resend',
+                            updatedAt: new Date()
+                        }
+                    }
+                );
+
+                this.logger.debug('Bulk deactivated existing codes', {
+                    modifiedCount: bulkUpdateResult.modifiedCount,
+                    matchedCount: bulkUpdateResult.matchedCount
+                });
+
+                this.logger.info('Successfully deactivated all existing codes', {
+                    deactivatedCount: existingCodes.length,
+                    verificationType: this.requestData.verificationType,
+                    isTemporaryAccount: this.isTemporaryAccount
+                });
+            } else {
+                this.logger.debug('No existing active codes found to deactivate');
+            }
+
+        } catch (error) {
+            this.logger.error('Error deactivating existing codes', {
+                error: error instanceof Error ? error.message : 'Unknown error',
+                verificationType: this.requestData.verificationType,
+                isTemporaryAccount: this.isTemporaryAccount
+            });
+
+            // Don't throw error here as this shouldn't prevent new code creation
+            // but log it as a warning for monitoring
+            this.logger.warn('Continuing with new code creation despite deactivation error');
+        }
+    }
+
 
     /**
      * Step 6: Send verification code
@@ -578,18 +634,6 @@ class ResendCodeBusinessHandler {
                 if (!defaultEmail) throw new HttpError('Email not found for verification', 400);
                 return { method: 'email', recipient: defaultEmail };
         }
-    }
-
-    private getPurposeDescription(): string {
-        const descriptions = {
-            'email_verification': 'Email verification for account registration',
-            'phone_verification': 'Phone number verification',
-            'mfa': 'Multi-factor authentication for login',
-            'password_reset': 'Password reset verification',
-            'account_recovery': 'Account recovery verification'
-        };
-
-        return descriptions[this.requestData.verificationType] || 'Verification code';
     }
 
     private getExpirationTime(): number {

@@ -1,6 +1,6 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { connectDB } from '../../utils/dbconnect';
-import { SuccessResponse, validateRequiredFields } from '../../utils/helper';
+import { extractAuthData, ExtractedAuthData, SuccessResponse, validateRequiredFields } from '../../utils/helper';
 import { createLogger } from '../../utils/logger';
 import { parseRequestBody } from '../../utils/requestParser';
 import HttpError from '../../exception/httpError';
@@ -17,21 +17,6 @@ interface ForgetPasswordRequest {
     phone?: string;
     username?: string;
 
-    // Device info for security
-    deviceInfo: {
-        deviceType?: 'desktop' | 'mobile' | 'tablet';
-        os: string;
-        browser: string;
-        userAgent: string;
-        fingerprint?: {
-            hash: string;
-            components: Record<string, any>;
-        };
-    };
-
-    // Captcha for bot protection
-    captchaToken?: string;
-    captchaProvider?: 'recaptcha' | 'hcaptcha' | 'cloudflare';
 }
 
 interface ForgetPasswordResponseData {
@@ -47,6 +32,7 @@ interface ForgetPasswordResponseData {
 
 class ForgetPasswordBusinessHandler {
     private requestData: ForgetPasswordRequest;
+    private authdata: ExtractedAuthData;
     private event: APIGatewayProxyEvent;
     private logger: ReturnType<typeof createLogger>;
     private sqsservice: SQSService;
@@ -65,6 +51,7 @@ class ForgetPasswordBusinessHandler {
         this.event = event;
         this.requestData = body;
         this.clientIP = event.requestContext?.identity?.sourceIp || 'unknown';
+        this.authdata = extractAuthData(event.headers as Record<string, string>);
 
         // Initialize services
         this.sqsservice = new SQSService();
@@ -113,7 +100,7 @@ class ForgetPasswordBusinessHandler {
         }
 
         // Device info validation
-        if (!this.requestData.deviceInfo?.os || !this.requestData.deviceInfo?.browser) {
+        if (!this.authdata.metadata.device?.os || !this.authdata.metadata.device?.browser) {
             throw new HttpError('Device information is required for security purposes', 400);
         }
 
@@ -298,7 +285,7 @@ class ForgetPasswordBusinessHandler {
                 },
                 sessionId: this.event.requestContext?.requestId,
                 ip: this.clientIP,
-                userAgent: this.requestData.deviceInfo.userAgent
+                userAgent: this.authdata.metadata.device.userAgent
             },
             security: {
                 requiresSecureChannel: true,
@@ -337,7 +324,7 @@ class ForgetPasswordBusinessHandler {
                         name: this.account.profile.firstName || 'User',
                         otp: otpCode,
                         expiryMinutes: 10,
-                        device: `${this.requestData.deviceInfo.browser} on ${this.requestData.deviceInfo.os}`,
+                        device: `${this.authdata.metadata.device.browser} on ${this.authdata.metadata.device.os}`,
                         location: this.deviceLocation?.country || 'Unknown',
                         ip_address: this.clientIP,
                         reset_time: new Date().toISOString(),
