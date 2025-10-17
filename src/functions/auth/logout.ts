@@ -1,18 +1,15 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { connectDB } from '../../utils/dbconnect';
-import { extractAuthData, ExtractedAuthData, SuccessResponse, validateRequiredFields } from '../../utils/helper';
+import { extractAuthData, ExtractedAuthData, SuccessResponse } from '../../utils/helper';
 import { createLogger } from '../../utils/logger';
 import { parseRequestBody } from '../../utils/requestParser';
 import HttpError from '../../exception/httpError';
 import { lambdaMiddleware } from '../../middleware/lambdaMiddleware';
-import { Account, IAccount } from '../../models/account.schema';
-import { Session, ISession } from '../../models/sessions.schema';
-import jwt from 'jsonwebtoken';
+import { Session, ISession, validReasons } from '../../models/sessions.schema';
 
 // ==================== INTERFACES ====================
 
 interface LogoutRequest {
-
     // Specific session to logout
     sessionId?: string;
 
@@ -20,7 +17,7 @@ interface LogoutRequest {
     logoutType?: 'current' | 'all_sessions' | 'all_other_sessions';
 
     // Reason for logout (optional)
-    reason?: 'user_initiated' | 'security' | 'admin' | 'session_timeout' | 'password_change';
+    reason?: 'logout' | 'timeout' | 'admin' | 'security' | 'max_sessions' | 'token_theft' | 'session_timeout' | 'password_change';
 }
 
 interface LogoutResponseData {
@@ -43,25 +40,34 @@ interface LogoutResponseData {
     }>;
 }
 
+// Interface for authorizer context
+interface AuthorizerContext {
+    accountId: string;
+    email?: string;
+    phone?: string;
+    accountStatus: string;
+    firstName?: string;
+    lastName?: string;
+    displayName?: string;
+    roles?: string;
+    permissions?: string;
+    sessionId?: string;
+    tokenType: string;
+    lastLogin?: string;
+}
+
 // ==================== BUSINESS HANDLER CLASS ====================
 
 class LogoutBusinessHandler {
     private requestData: LogoutRequest;
     private authdata: ExtractedAuthData;
+    private authContext: AuthorizerContext;
 
     private event: APIGatewayProxyEvent;
     private logger: ReturnType<typeof createLogger>;
 
-    // Environment variables
-    private readonly JWT_SECRET: string;
-    private readonly REFRESH_TOKEN_SECRET: string;
-
     // Data holders
-    private account: IAccount | null = null;
-    private currentSession: ISession | null = null;
     private clientIP: string = '';
-    private decodedToken?: any;
-    private accountId?: string;
 
     constructor(event: APIGatewayProxyEvent, body: LogoutRequest) {
         const requestId = event.requestContext?.requestId || 'unknown';
@@ -70,16 +76,22 @@ class LogoutBusinessHandler {
         this.clientIP = event.requestContext?.identity?.sourceIp || 'unknown';
         this.authdata = extractAuthData(event.headers as Record<string, string>);
 
-        // Get environment variables
-        this.JWT_SECRET = process.env.JWT_SECRET || '';
-        this.REFRESH_TOKEN_SECRET = process.env.REFRESH_TOKEN_SECRET || '';
+        // Extract authorizer context - this comes from the CustomAuthorizer
+        this.authContext = (event.requestContext?.authorizer || {}) as AuthorizerContext;
+
+        // Validate that accountId exists in context
+        if (!this.authContext.accountId) {
+            throw new HttpError('Authorization context missing - accountId not found', 401);
+        }
 
         this.logger = createLogger('auth-service', requestId);
 
         this.logger.appendPersistentKeys({
             userAgent: event.headers?.['User-Agent'],
             sourceIP: this.clientIP,
-            functionName: 'logout'
+            functionName: 'logout',
+            accountId: this.authContext.accountId,
+            sessionId: this.authContext.sessionId
         });
     }
 
@@ -89,21 +101,15 @@ class LogoutBusinessHandler {
     async processRequest(): Promise<LogoutResponseData> {
         this.logger.info('Starting logout process', {
             logoutType: this.requestData.logoutType || 'current',
-            reason: this.requestData.reason || 'user_initiated'
+            reason: this.requestData.reason || 'user_initiated',
+            accountId: this.authContext.accountId,
+            sessionId: this.authContext.sessionId
         });
 
         // Step 1: Validate request data
         this.validateRequestData();
 
-        // Step 2: Extract account information
-        await this.extractAccountInformation();
-
-        // Step 3: Find account (if we have accountId)
-        if (this.accountId) {
-            await this.findAccount();
-        }
-
-        // Step 4: Perform logout based on type
+        // Step 2: Perform logout based on type
         return await this.performLogout();
     }
 
@@ -112,11 +118,6 @@ class LogoutBusinessHandler {
      */
     private validateRequestData(): void {
         this.logger.debug('Validating logout request data');
-
-        // At least token or sessionId required
-        if (!this.authdata.authorization && !this.requestData.sessionId) {
-            throw new HttpError('Token or sessionId is required for logout', 400);
-        }
 
         // Validate logout type
         const validLogoutTypes = ['current', 'all_sessions', 'all_other_sessions'];
@@ -130,142 +131,25 @@ class LogoutBusinessHandler {
         }
 
         // Validate reason
-        const validReasons = ['user_initiated', 'security', 'admin', 'session_timeout', 'password_change'];
         if (this.requestData.reason && !validReasons.includes(this.requestData.reason)) {
             throw new HttpError('Invalid logout reason', 400);
         }
 
         // Set default reason
         if (!this.requestData.reason) {
-            this.requestData.reason = 'user_initiated';
+            this.requestData.reason = 'logout';
         }
 
         this.logger.debug('Request validation completed');
     }
 
     /**
-     * Step 2: Extract account information from token or session
-     */
-    private async extractAccountInformation(): Promise<void> {
-        this.logger.debug('Extracting account information');
-
-        if (this.authdata.authorization) {
-            await this.decodeToken();
-        } else if (this.requestData.sessionId) {
-            await this.findSessionById();
-        }
-
-        if (!this.accountId) {
-            throw new HttpError('Unable to identify account for logout', 400);
-        }
-
-        this.logger.debug('Account information extracted', {
-            accountId: this.accountId
-        });
-    }
-
-    /**
-     * Decode token to get account information
-     */
-    private async decodeToken(): Promise<void> {
-        if (!this.authdata.authorization) return;
-
-        try {
-            // Try as access token first
-            this.decodedToken = jwt.verify(this.authdata.authorization, this.JWT_SECRET);
-            this.accountId = this.decodedToken.accountId;
-
-            this.logger.debug('Token decoded as access token', {
-                tokenType: this.decodedToken.type,
-                accountId: this.accountId
-            });
-
-        } catch (accessTokenError) {
-            try {
-                // Try as refresh token
-                this.decodedToken = jwt.verify(this.authdata.authorization, this.REFRESH_TOKEN_SECRET);
-                this.accountId = this.decodedToken.accountId;
-
-                this.logger.debug('Token decoded as refresh token', {
-                    tokenType: this.decodedToken.type,
-                    accountId: this.accountId
-                });
-
-            } catch (refreshTokenError) {
-                // Token might be expired or invalid, but we can still try to extract accountId
-                try {
-                    // Decode without verification to get accountId
-                    const decoded = jwt.decode(this.authdata.authorization) as any;
-                    if (decoded && decoded.accountId) {
-                        this.accountId = decoded.accountId;
-                        this.logger.warn('Used expired/invalid token for logout - extracted accountId', {
-                            accountId: this.accountId
-                        });
-                    } else {
-                        throw new HttpError('Invalid token format', 400);
-                    }
-                } catch (decodeError) {
-                    throw new HttpError('Invalid token provided for logout', 400);
-                }
-            }
-        }
-    }
-
-    /**
-     * Find session by sessionId to get account information
-     */
-    private async findSessionById(): Promise<void> {
-        if (!this.requestData.sessionId) return;
-
-        const session = await Session.findOne({
-            sessionId: this.requestData.sessionId,
-            isActive: true
-        });
-
-        if (!session) {
-            throw new HttpError('Session not found', 404);
-        }
-
-        this.accountId = session.accountId.toString();
-        this.currentSession = session;
-    }
-
-    /**
-     * Step 3: Find account
-     */
-    private async findAccount(): Promise<void> {
-        if (!this.accountId) return;
-
-        this.logger.debug('Finding account');
-
-        this.account = await Account.findOne({
-            _id: this.accountId
-        });
-
-        if (!this.account) {
-            this.logger.warn('Account not found during logout', {
-                accountId: this.accountId
-            });
-            // Don't throw error - we can still proceed with session cleanup
-        }
-
-        this.logger.debug('Account lookup completed', {
-            accountId: this.accountId,
-            accountFound: !!this.account
-        });
-    }
-
-    /**
-     * Step 4: Perform logout based on type
+     * Step 2: Perform logout based on type
      */
     private async performLogout(): Promise<LogoutResponseData> {
-        if (!this.accountId) {
-            throw new HttpError('Account ID not found', 400);
-        }
-
         this.logger.debug('Performing logout', {
             logoutType: this.requestData.logoutType,
-            accountId: this.accountId
+            accountId: this.authContext.accountId
         });
 
         let terminatedSessions: Array<{
@@ -300,14 +184,8 @@ class LogoutBusinessHandler {
                 break;
         }
 
-        // Update account last logout time
-        // if (this.account) {
-        //     // this.account.lastLogout = new Date();
-        //     // await this.account.save();
-        // }
-
         this.logger.info('Logout completed successfully', {
-            accountId: this.accountId,
+            accountId: this.authContext.accountId,
             logoutType: this.requestData.logoutType,
             sessionsTerminated,
             tokensRevoked,
@@ -319,7 +197,7 @@ class LogoutBusinessHandler {
             message: this.getLogoutMessage(),
             logoutType: this.requestData.logoutType!,
             sessionsTerminated,
-            accountId: this.accountId,
+            accountId: this.authContext.accountId,
             securityLogout: this.requestData.reason === 'security',
             tokensRevoked,
             terminatedSessions: terminatedSessions.length > 0 ? terminatedSessions : undefined
@@ -341,34 +219,40 @@ class LogoutBusinessHandler {
     }> {
         this.logger.debug('Logging out current session');
 
-        let session: ISession | null = this.currentSession;
+        let session: ISession | null = null;
 
-        // If we don't have current session, find it by token or sessionId
-        if (!session) {
-            if (this.requestData.sessionId) {
-                session = await Session.findOne({
-                    sessionId: this.requestData.sessionId,
-                    accountId: this.accountId,
-                    isActive: true
-                });
-            } else if (this.decodedToken?.sessionId) {
-                session = await Session.findOne({
-                    sessionId: this.decodedToken.sessionId,
-                    accountId: this.accountId,
-                    isActive: true
-                });
-            } else {
-                // Find session by access token
-                session = await Session.findOne({
-                    accessToken: this.authdata.authorization,
-                    accountId: this.accountId,
-                    isActive: true
-                });
-            }
+        // Priority 1: Use sessionId from authorizer context
+        if (this.authContext.sessionId) {
+            session = await Session.findOne({
+                sessionId: this.authContext.sessionId,
+                accountId: this.authContext.accountId,
+                isActive: true
+            });
+        }
+
+        // Priority 2: Use sessionId from request body
+        if (!session && this.requestData.sessionId) {
+            session = await Session.findOne({
+                sessionId: this.requestData.sessionId,
+                accountId: this.authContext.accountId,
+                isActive: true
+            });
+        }
+
+        // Priority 3: Find session by access token
+        if (!session && this.authdata.authorization) {
+            session = await Session.findOne({
+                accessToken: this.authdata.authorization,
+                accountId: this.authContext.accountId,
+                isActive: true
+            });
         }
 
         if (!session) {
-            this.logger.warn('No active session found to logout');
+            this.logger.warn('No active session found to logout', {
+                authContextSessionId: this.authContext.sessionId,
+                requestSessionId: this.requestData.sessionId
+            });
             return {
                 terminatedSessions: [],
                 sessionsTerminated: 0,
@@ -387,11 +271,12 @@ class LogoutBusinessHandler {
             timestamp: new Date()
         });
 
+        // Count tokens to be revoked
+        const tokensRevoked = session.refreshTokens.filter(rt => !rt.isRevoked).length;
+
         // Terminate session
         session.terminate(this.requestData.reason!, 'user');
         await session.save();
-
-        const tokensRevoked = session.refreshTokens.filter(rt => !rt.isRevoked).length;
 
         const terminatedSession = {
             sessionId: session.sessionId,
@@ -423,7 +308,7 @@ class LogoutBusinessHandler {
         this.logger.debug('Logging out all sessions');
 
         const sessions = await Session.find({
-            accountId: this.accountId,
+            accountId: this.authContext.accountId,
             isActive: true,
             status: 'active'
         });
@@ -494,18 +379,14 @@ class LogoutBusinessHandler {
     }> {
         this.logger.debug('Logging out all other sessions');
 
-        // Find current session ID
-        let currentSessionId = this.requestData.sessionId;
+        // Use sessionId from authorizer context or request
+        let currentSessionId = this.authContext.sessionId || this.requestData.sessionId;
 
-        if (!currentSessionId && this.decodedToken?.sessionId) {
-            currentSessionId = this.decodedToken.sessionId;
-        }
-
+        // If still no sessionId, try to find by access token
         if (!currentSessionId && this.authdata.authorization) {
-            // Try to find session by access token
             const currentSession = await Session.findOne({
                 accessToken: this.authdata.authorization,
-                accountId: this.accountId,
+                accountId: this.authContext.accountId,
                 isActive: true
             });
             currentSessionId = currentSession?.sessionId;
@@ -513,7 +394,7 @@ class LogoutBusinessHandler {
 
         // Find all sessions except current
         const query: any = {
-            accountId: this.accountId,
+            accountId: this.authContext.accountId,
             isActive: true,
             status: 'active'
         };
@@ -605,8 +486,6 @@ class LogoutBusinessHandler {
 const LogoutHandler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
     const requestId = event.requestContext?.requestId || 'unknown';
     const logger = createLogger('auth-service', requestId);
-
-    console.log(event);
 
     logger.appendPersistentKeys({
         httpMethod: event.httpMethod,

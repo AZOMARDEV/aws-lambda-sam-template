@@ -39,7 +39,7 @@ Globals:
     # Add MONGODB_URI to all functions globally
     Environment:
       Variables:
-        MONGODB_URI: mongodb+srv://jabadoorapp:jbH79nBVnVgk6BVE@jabadoorapp.n6uc5.mongodb.net/trueid?retryWrites=true&w=majority&appName=JabadoorApp
+        MONGODB_URI: mongodb+srv://awslambda:unXfVGzO1xWVTs7t@clusterautoparking.smjndtt.mongodb.net/otoparking?retryWrites=true&w=majority&appName=ClusterAutoParking
   Api:
     TracingEnabled: true
 Resources:

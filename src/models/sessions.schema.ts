@@ -1,5 +1,7 @@
 import { Schema, model, Document, Types } from 'mongoose';
 
+export const validReasons = ['logout', 'timeout', 'admin', 'security', 'max_sessions', 'token_theft', 'session_timeout', 'password_change'];
+
 // Interfaces
 export interface IDeviceInfo {
   deviceId?: string;

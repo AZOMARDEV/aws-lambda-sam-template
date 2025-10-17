@@ -13,7 +13,7 @@ export interface ITempProfile {
 }
 
 export interface IRegistrationContext {
-  registrationMethod: 'email' | 'phone' | 'social' | 'invitation';
+  registrationMethod: 'email' | 'sms' | 'phone' | 'social' | 'invitation';
   socialProvider?: 'google' | 'facebook' | 'apple' | 'github' | 'twitter' | 'linkedin';
   socialProviderId?: string;
   invitationCode?: string;
@@ -227,7 +227,7 @@ const TempProfileSchema = new Schema<ITempProfile>({
 const RegistrationContextSchema = new Schema<IRegistrationContext>({
   registrationMethod: {
     type: String,
-    enum: ['email', 'phone', 'social', 'invitation'],
+    enum: ['email', 'sms' , 'phone', 'social', 'invitation'],
     required: true
   },
   socialProvider: {

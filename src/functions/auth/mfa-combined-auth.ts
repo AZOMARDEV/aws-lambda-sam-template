@@ -21,7 +21,7 @@ interface CombinedAuthRequest {
     phone?: string;
 
     // Registration context
-    combinedMethod?: 'email' | 'phone';
+    combinedMethod?: 'email' | 'sms';
 
     // Compliance (for new registrations)
     termsAccepted?: boolean;
@@ -528,13 +528,13 @@ class CombinedAuthBusinessHandler {
     // ==================== HELPER METHODS ====================
 
     private async createTempAccount(): Promise<void> {
-        const registrationMethod = this.determineRegistrationMethod();
+        const registrationMethod = this.determineVerificationMethod();
 
         const tempAccountData = {
             email: this.requestData.email?.toLowerCase(),
             phone: this.requestData.phone,
             registrationContext: {
-                registrationMethod: registrationMethod as 'email' | 'phone'
+                registrationMethod: registrationMethod
             },
             verificationRequirements: {
                 emailVerification: {
@@ -543,7 +543,7 @@ class CombinedAuthBusinessHandler {
                     attempts: 0
                 },
                 phoneVerification: {
-                    required: !!this.requestData.phone && registrationMethod === 'phone',
+                    required: !!this.requestData.phone && registrationMethod === 'sms',
                     completed: false,
                     attempts: 0
                 }
@@ -584,7 +584,7 @@ class CombinedAuthBusinessHandler {
     private async sendRegistrationOTP(method: 'email' | 'sms'): Promise<void> {
         if (!this.tempAccount) return;
 
-        const registrationMethod = this.determineRegistrationMethod();
+        const registrationMethod = this.determineVerificationMethod();
         const otpCode = VerificationCode.generateCode(6);
         this.loginSessionId = `register_${Date.now()}_${Math.random().toString(36).substring(2)}`;
 
@@ -709,7 +709,14 @@ class CombinedAuthBusinessHandler {
                 sms: {
                     message: this.project?.settings?.smsSettings?.templates?.verification ||
                         `Your verification code is: ${otpCode}. This code expires in ${isLogin ? '5' : '10'} minutes.`,
-                    recipient: recipient
+                    data: {
+                        otp: otpCode,
+                        expiryMinutes: isLogin ? 5 : 10,
+                        phone: recipient,
+                        appName: process.env.APP_NAME,
+                        supportEmail: process.env.SUPPORT_EMAIL,
+                    },
+                    recipient: recipient,
                 }
             } : {
                 email: {
@@ -980,45 +987,45 @@ class CombinedAuthBusinessHandler {
         return this.requestData.email || this.requestData.phone || '';
     }
 
-    private determineRegistrationMethod(): 'email' | 'phone' {
+    private determineVerificationMethod(): 'email' | 'sms' {
         if (this.requestData.combinedMethod) {
             return this.requestData.combinedMethod;
         }
-        return this.requestData.email ? 'email' : 'phone';
+        return this.requestData.email ? 'email' : 'sms';
     }
 
-    private determineVerificationMethod(): 'email' | 'sms' {
-        // Check if both email and phone are available
-        const hasEmail = !!(this.account?.email || this.requestData.email);
-        const hasPhone = !!(this.account?.phone || this.requestData.phone);
+    // private determineVerificationMethod(): 'email' | 'sms' {
+    //     // Check if both email and phone are available
+    //     const hasEmail = !!(this.account?.email || this.requestData.email);
+    //     const hasPhone = !!(this.account?.phone || this.requestData.phone);
 
-        // Check project settings for supported methods
-        const supportedMethods = this.project?.settings?.mfa?.methods || ['EMAIL'];
+    //     // Check project settings for supported methods
+    //     const supportedMethods = this.project?.settings?.mfa?.methods || ['EMAIL'];
 
-        // If combinedMethod is specified, use it if supported
-        // if (this.requestData.combinedMethod) {
-        //     const methodMapping = { 'email': 'EMAIL', 'phone': 'SMS' };
-        //     const projectMethod = methodMapping[this.requestData.combinedMethod];
-        //     if (supportedMethods.includes(projectMethod)) {
-        //         return this.requestData.combinedMethod === 'phone' ? 'sms' : 'email';
-        //     }
-        // }
+    //     // If combinedMethod is specified, use it if supported
+    //     // if (this.requestData.combinedMethod) {
+    //     //     const methodMapping = { 'email': 'EMAIL', 'phone': 'SMS' };
+    //     //     const projectMethod = methodMapping[this.requestData.combinedMethod];
+    //     //     if (supportedMethods.includes(projectMethod)) {
+    //     //         return this.requestData.combinedMethod === 'phone' ? 'sms' : 'email';
+    //     //     }
+    //     // }
 
-        // Default preference: SMS if phone available and SMS enabled, otherwise email
-        if (hasPhone && supportedMethods.includes('SMS')) {
-            return 'sms';
-        }
+    //     // Default preference: SMS if phone available and SMS enabled, otherwise email
+    //     if (hasPhone && supportedMethods.includes('SMS')) {
+    //         return 'sms';
+    //     }
 
-        if (hasEmail && supportedMethods.includes('EMAIL')) {
-            return 'email';
-        }
+    //     if (hasEmail && supportedMethods.includes('EMAIL')) {
+    //         return 'email';
+    //     }
 
-        // Fallback based on what's available
-        if (hasEmail) return 'email';
-        if (hasPhone) return 'sms';
+    //     // Fallback based on what's available
+    //     if (hasEmail) return 'email';
+    //     if (hasPhone) return 'sms';
 
-        throw new HttpError('No valid verification method available', 400);
-    }
+    //     throw new HttpError('No valid verification method available', 400);
+    // }
 
     private maskIdentifier(identifier: string): string {
         if (identifier.includes('@')) {

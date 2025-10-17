@@ -33,6 +33,7 @@ export interface IRateLimit {
 
 type NotificationType =
   | 'email_verification'
+  | 'sms_verification'
   | 'phone_verification'
   | 'password_reset'
   | 'mfa'
@@ -240,6 +241,7 @@ const VerificationCodeSchema = new Schema<IVerificationCode>({
     type: String,
     enum: [
       'email_verification',
+      'sms_verification',
       'phone_verification',
       'password_reset',
       'mfa',

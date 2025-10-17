@@ -3,8 +3,6 @@ import axios, { AxiosError } from 'axios';
 import { SuccessResponse } from "../../utils/helper";
 import AWS from 'aws-sdk';
 import Handlebars from 'handlebars';
-// import EmailLogsModel from "../../models/email_logs.schema";
-import { connectDB } from "../../utils/dbconnect";
 
 // Register Handlebars helpers (keeping your existing ones)
 Handlebars.registerHelper('eq', function (a: any, b: any) {
@@ -312,6 +310,7 @@ interface EmailContent {
 
 interface SmsContent {
     message: string;
+    recipient: string;
     data: NotificationData;
     metadata?: Record<string, any>;
 }
@@ -359,13 +358,14 @@ interface NotificationConfig {
     TEMPLATE_BUCKET: string;
     PDF_BUCKET: string;
     MONGODB_URI: string;
-    SMS_API_KEY?: string;
-    SMS_API_URL?: string;
+    SMS_API_KEY: string;  // Make required
+    SMS_API_URL: string;  // Make required
+    SMS_INTERFACE_ID: string;  // Add new
 }
 
 const CONFIG: NotificationConfig = {
     EMAIL_SENDER: {
-        NAME: process.env.EMAIL_SENDER_NAME || 'Jabadoor',
+        NAME: process.env.EMAIL_SENDER_NAME || 'OtoParking',
         EMAIL: process.env.EMAIL_SENDER_EMAIL || 'omaar.azhaarii@gmail.com'
     },
     EMAIL_API_KEY: process.env.BREVO_API_KEY || '',
@@ -373,9 +373,19 @@ const CONFIG: NotificationConfig = {
     TEMPLATE_BUCKET: process.env.TEMPLATE_BUCKET || '',
     PDF_BUCKET: process.env.PDF_BUCKET || process.env.TEMPLATE_BUCKET || '',
     MONGODB_URI: process.env.MONGODB_URI || '',
-    SMS_API_KEY: process.env.SMS_API_KEY || '',
-    SMS_API_URL: process.env.SMS_API_URL || ''
+    SMS_API_KEY: process.env.SMS_API_KEY || '123456-SECRET-API-KEY',
+    SMS_API_URL: process.env.SMS_API_URL || 'http://161.97.113.215:8888/SMSGateway/api/sms/send',
+    SMS_INTERFACE_ID: process.env.SMS_INTERFACE_ID || '101'
 };
+
+interface SmsPayload {
+    channelId: string;
+    gsmNumber: string;
+    gsmCountry: string;
+    gsmPrefix: string;
+    languageCode: string;
+    smsText: string;
+}
 
 /**
  * Base Notification Service Interface
@@ -739,9 +749,16 @@ class SmsService implements INotificationService {
     }
 
     /**
-     * Extract phone number from data object
+     * Extract phone number from content or data object
      */
-    extractRecipient(data: NotificationData): string {
+    extractRecipient(content: SmsContent): string {
+        // First check content.recipient
+        if (content.recipient) {
+            return content.recipient;
+        }
+
+        const { data } = content;
+
         // Direct phone property
         if (data.phone) {
             return data.phone;
@@ -772,81 +789,281 @@ class SmsService implements INotificationService {
             return data.to.phone;
         }
 
-        throw new Error('No phone number found in data object. Please include phone in one of these paths: phone, client.phone, user.phone, customer.phone, recipient.phone, or to.phone');
+        throw new Error('No phone number found. Please include phone in: recipient, phone, client.phone, user.phone, customer.phone, recipient.phone, or to.phone');
     }
 
     /**
-     * Send SMS notification (currently not implemented)
+     * Send SMS notification
      */
     async sendNotification(content: SmsContent, data: NotificationData, metadata: Record<string, any>): Promise<any> {
-        console.log('SMS Service called with content:', content);
+        console.log('SMS Service: Starting to send SMS');
 
         try {
-            const recipientPhone = this.extractRecipient(content.data);
+            // Validate API configuration
+            if (!this.config.SMS_API_KEY || !this.config.SMS_API_URL || !this.config.SMS_INTERFACE_ID) {
+                throw new Error('SMS configuration is incomplete. Please check SMS_API_KEY, SMS_API_URL, and SMS_INTERFACE_ID environment variables.');
+            }
 
-            // For now, return a "not supported" response
-            const response = {
-                channel: 'sms',
-                status: 'not_supported',
-                message: 'SMS notifications are not supported yet. This feature is coming soon!',
-                recipient: recipientPhone,
-                requestedMessage: content.message
+            // Extract recipient phone number
+            const recipientPhone = this.extractRecipient(content);
+            console.log('SMS Service: Recipient phone:', recipientPhone);
+
+            // Process the message with variable substitution
+            const processedMessage = this.processMessage(content.message, content.data);
+            console.log('SMS Service: Processed message length:', processedMessage.length);
+
+            // Parse phone number to extract country code and number
+            const { gsmNumber, gsmPrefix, gsmCountry } = this.parsePhoneNumber(recipientPhone);
+
+            // Prepare SMS payload
+            const smsPayload: SmsPayload = {
+                channelId: "WEB",
+                gsmNumber: gsmNumber,
+                gsmCountry: gsmCountry,
+                gsmPrefix: gsmPrefix,
+                languageCode: metadata?.languageCode || content.metadata?.languageCode || "fr",
+                smsText: processedMessage
             };
 
-            console.log('SMS not supported yet:', response);
-            return response;
+            console.log('SMS Service: Sending SMS with payload:', {
+                channelId: smsPayload.channelId,
+                gsmNumber: smsPayload.gsmNumber,
+                gsmCountry: smsPayload.gsmCountry,
+                gsmPrefix: smsPayload.gsmPrefix,
+                languageCode: smsPayload.languageCode,
+                messageLength: smsPayload.smsText.length,
+                messagePreview: smsPayload.smsText.substring(0, 50) + '...'
+            });
 
-            // TODO: Implement actual SMS sending logic here
-            // Example structure for future implementation:
-            /*
-            const smsPayload = {
-                to: recipientPhone,
-                message: this.processMessage(content.message, content.data),
-                from: this.config.SMS_SENDER || 'YourApp'
-            };
-
+            // Send SMS via API
             const response = await axios.post(
                 this.config.SMS_API_URL,
                 smsPayload,
                 {
                     headers: {
-                        "Authorization": `Bearer ${this.config.SMS_API_KEY}`,
                         "Content-Type": "application/json",
+                        "X-Interface-Id": this.config.SMS_INTERFACE_ID,
+                        "X-Api-Key": this.config.SMS_API_KEY
                     },
+                    timeout: 30000 // 30 seconds timeout
                 }
             );
+
+            console.log("SMS Service: SMS sent successfully:", response.data);
 
             return {
                 channel: 'sms',
                 status: 'sent',
                 result: response.data,
-                recipient: recipientPhone
+                recipient: recipientPhone,
+                messageId: response.data?.messageId || response.data?.id || 'N/A',
+                details: {
+                    gsmNumber,
+                    gsmPrefix,
+                    gsmCountry,
+                    messageLength: processedMessage.length
+                }
             };
-            */
+
         } catch (error) {
-            console.error('Error in SMS service:', error);
+            const axiosError = error as AxiosError;
+            
+            console.error('SMS Service: Error sending SMS:', {
+                status: axiosError.response?.status,
+                statusText: axiosError.response?.statusText,
+                data: axiosError.response?.data,
+                message: axiosError.message,
+                code: axiosError.code
+            });
+
+            // Return detailed error information
             return {
                 channel: 'sms',
                 status: 'error',
-                message: error instanceof Error ? error.message : 'Unknown error occurred',
-                recipient: 'unknown'
+                error: error instanceof Error ? error.message : 'Unknown error occurred',
+                recipient: 'unknown',
+                details: {
+                    httpStatus: axiosError.response?.status,
+                    errorData: axiosError.response?.data,
+                    errorCode: axiosError.code
+                }
             };
         }
     }
 
     /**
+     * Parse phone number to extract components
+     * Supports multiple country formats
+     */
+    private parsePhoneNumber(phone: string): { gsmNumber: string; gsmPrefix: string; gsmCountry: string } {
+        // Remove all non-digit characters except +
+        let cleanPhone = phone.replace(/[^\d+]/g, '');
+
+        // Country codes mapping
+        const countryCodes: Record<string, { prefix: string; country: string; length: number }> = {
+            '212': { prefix: '+212', country: 'Morocco', length: 3 },
+            '213': { prefix: '+213', country: 'Algeria', length: 3 },
+            '216': { prefix: '+216', country: 'Tunisia', length: 3 },
+            '1': { prefix: '+1', country: 'USA/Canada', length: 1 },
+            '33': { prefix: '+33', country: 'France', length: 2 },
+            '44': { prefix: '+44', country: 'UK', length: 2 },
+            '49': { prefix: '+49', country: 'Germany', length: 2 },
+            '34': { prefix: '+34', country: 'Spain', length: 2 },
+            '39': { prefix: '+39', country: 'Italy', length: 2 },
+            '966': { prefix: '+966', country: 'Saudi Arabia', length: 3 },
+            '971': { prefix: '+971', country: 'UAE', length: 3 },
+        };
+
+        let gsmPrefix = '+212'; // Default to Morocco
+        let gsmCountry = 'Morocco';
+        let gsmNumber = '';
+
+        // Check if phone starts with +
+        if (cleanPhone.startsWith('+')) {
+            // Try to match country codes
+            let matched = false;
+            for (const [code, info] of Object.entries(countryCodes)) {
+                if (cleanPhone.startsWith('+' + code)) {
+                    gsmPrefix = info.prefix;
+                    gsmCountry = info.country;
+                    gsmNumber = cleanPhone.substring(info.length + 1); // +1 for the + sign
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched) {
+                // Unknown country code, keep as is
+                const possibleCode = cleanPhone.substring(1, 4);
+                gsmPrefix = '+' + possibleCode;
+                gsmCountry = 'Unknown';
+                gsmNumber = cleanPhone.substring(4);
+            }
+        } else {
+            // No + sign, try to detect country code
+            let matched = false;
+            for (const [code, info] of Object.entries(countryCodes)) {
+                if (cleanPhone.startsWith(code)) {
+                    gsmPrefix = info.prefix;
+                    gsmCountry = info.country;
+                    gsmNumber = cleanPhone.substring(info.length);
+                    matched = true;
+                    break;
+                }
+            }
+
+            if (!matched) {
+                // Check if starts with 0 (local format)
+                if (cleanPhone.startsWith('0')) {
+                    // Assume Morocco local format
+                    gsmPrefix = '+212';
+                    gsmCountry = 'Morocco';
+                    gsmNumber = cleanPhone; // Keep the 0 for local format
+                } else {
+                    // No recognizable format, assume Morocco
+                    gsmPrefix = '+212';
+                    gsmCountry = 'Morocco';
+                    gsmNumber = cleanPhone;
+                }
+            }
+        }
+
+        // Clean up gsmNumber - remove leading zeros if in international format
+        if (!phone.startsWith('0') && gsmNumber.startsWith('0')) {
+            gsmNumber = gsmNumber.substring(1);
+        }
+
+        console.log('SMS Service: Parsed phone number:', {
+            original: phone,
+            cleaned: cleanPhone,
+            gsmPrefix,
+            gsmCountry,
+            gsmNumber
+        });
+
+        return { gsmNumber, gsmPrefix, gsmCountry };
+    }
+
+    /**
      * Process SMS message with data substitution
+     * Supports Handlebars-style variables
      */
     private processMessage(message: string, data: NotificationData): string {
         let processedMessage = message;
 
-        // Simple variable replacement for SMS
-        const variablePattern = /\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}/g;
-        processedMessage = processedMessage.replace(variablePattern, (match, varName) => {
-            return data[varName] !== undefined ? String(data[varName]) : match;
+        // Handle nested properties (e.g., {{client.name}})
+        const nestedPattern = /\{\{([a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_.]*)\}\}/g;
+        processedMessage = processedMessage.replace(nestedPattern, (match, path) => {
+            const keys = path.split('.');
+            let value: any = data;
+            
+            for (const key of keys) {
+                if (value && typeof value === 'object' && key in value) {
+                    value = value[key];
+                } else {
+                    return match; // Keep original if path not found
+                }
+            }
+            
+            return value !== undefined && value !== null ? String(value) : match;
+        });
+
+        // Handle simple variables (e.g., {{name}})
+        const simplePattern = /\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}/g;
+        processedMessage = processedMessage.replace(simplePattern, (match, varName) => {
+            return data[varName] !== undefined && data[varName] !== null ? String(data[varName]) : match;
         });
 
         return processedMessage;
+    }
+
+    /**
+     * Validate phone number format
+     */
+    validatePhoneNumber(phone: string): { isValid: boolean; error?: string } {
+        if (!phone || phone.trim().length === 0) {
+            return { isValid: false, error: 'Phone number is empty' };
+        }
+
+        // Remove all non-digit characters except +
+        const cleanPhone = phone.replace(/[^\d+]/g, '');
+
+        if (cleanPhone.length < 8) {
+            return { isValid: false, error: 'Phone number is too short' };
+        }
+
+        if (cleanPhone.length > 15) {
+            return { isValid: false, error: 'Phone number is too long' };
+        }
+
+        return { isValid: true };
+    }
+
+    /**
+     * Calculate SMS message parts (for multi-part messages)
+     */
+    calculateMessageParts(message: string): { parts: number; length: number; encoding: string } {
+        const length = message.length;
+        
+        // Check if message contains unicode characters
+        const hasUnicode = /[^\x00-\x7F]/.test(message);
+        
+        if (hasUnicode) {
+            // Unicode messages: 70 chars per part, 67 for multi-part
+            const charsPerPart = length <= 70 ? 70 : 67;
+            return {
+                parts: Math.ceil(length / charsPerPart),
+                length,
+                encoding: 'unicode'
+            };
+        } else {
+            // GSM-7 encoding: 160 chars per part, 153 for multi-part
+            const charsPerPart = length <= 160 ? 160 : 153;
+            return {
+                parts: Math.ceil(length / charsPerPart),
+                length,
+                encoding: 'gsm7'
+            };
+        }
     }
 }
 
@@ -897,6 +1114,19 @@ class NotificationService {
                             if (!this.smsService.validateContent(content.sms)) {
                                 throw new Error('Invalid SMS content structure');
                             }
+                            
+                            // Validate phone number before sending
+                            const recipientPhone = this.smsService.extractRecipient(content.sms);
+                            const phoneValidation = this.smsService.validatePhoneNumber(recipientPhone);
+                            
+                            if (!phoneValidation.isValid) {
+                                throw new Error(`Invalid phone number: ${phoneValidation.error}`);
+                            }
+                            
+                            // Calculate message parts
+                            const messageParts = this.smsService.calculateMessageParts(content.sms.message);
+                            console.log('SMS message analysis:', messageParts);
+                            
                             result = await this.smsService.sendNotification(
                                 content.sms,
                                 content.sms.data,
@@ -906,7 +1136,6 @@ class NotificationService {
                             throw new Error('SMS content not provided for SMS channel');
                         }
                         break;
-
                     case 'push':
                         // Future implementation
                         result = {

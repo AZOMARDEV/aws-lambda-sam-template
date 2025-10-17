@@ -20,7 +20,7 @@ interface ResendCodeRequest {
     accountId?: string;
 
     // Code type and method
-    verificationType: 'email_verification' | 'phone_verification' | 'mfa' | 'password_reset' | 'account_recovery';
+    verificationType: 'email_verification' | 'sms_verification' | 'mfa' | 'password_reset' | 'account_recovery';
     method?: 'sms' | 'email' | 'whatsapp';
 
     // For 2FA resend - requires login session
@@ -141,7 +141,7 @@ class ResendCodeBusinessHandler {
                     throw new HttpError('Email or accountId is required for email verification', 400);
                 }
                 break;
-            case 'phone_verification':
+            case 'sms_verification':
                 if (!this.requestData.phone && !this.requestData.accountId) {
                     throw new HttpError('Phone or accountId is required for phone verification', 400);
                 }
@@ -600,7 +600,7 @@ class ResendCodeBusinessHandler {
                 if (!email) throw new HttpError('Email not found for verification', 400);
                 return { method: 'email', recipient: email };
 
-            case 'phone_verification':
+            case 'sms_verification':
                 const phone = this.requestData.phone ||
                     this.account?.phone ||
                     this.tempAccount?.phone;
@@ -639,7 +639,7 @@ class ResendCodeBusinessHandler {
     private getExpirationTime(): number {
         const expirationTimes = {
             'email_verification': 30 * 60 * 1000, // 30 minutes
-            'phone_verification': 10 * 60 * 1000, // 10 minutes
+            'sms_verification': 10 * 60 * 1000, // 10 minutes
             'mfa': 5 * 60 * 1000, // 5 minutes
             'password_reset': 15 * 60 * 1000, // 15 minutes
             'account_recovery': 15 * 60 * 1000 // 15 minutes
@@ -651,7 +651,7 @@ class ResendCodeBusinessHandler {
     private getNotificationType(method: string): string {
         const notificationTypes = {
             'email_verification': 'email_verification',
-            'phone_verification': 'sms_verification',
+            'sms_verification': 'sms_verification',
             'mfa': method === 'sms' ? 'sms_2fa' : 'email_2fa',
             'password_reset': 'email_password_reset',
             'account_recovery': 'email_account_recovery'
@@ -663,7 +663,7 @@ class ResendCodeBusinessHandler {
     private getSMSMessage(code: string): string {
         const messages = {
             'email_verification': `Your email verification code is: ${code}. This code expires in 30 minutes.`,
-            'phone_verification': `Your phone verification code is: ${code}. This code expires in 10 minutes.`,
+            'sms_verification': `Your phone verification code is: ${code}. This code expires in 10 minutes.`,
             'mfa': `Your login verification code is: ${code}. This code expires in 5 minutes.`,
             'password_reset': `Your password reset code is: ${code}. This code expires in 15 minutes.`,
             'account_recovery': `Your account recovery code is: ${code}. This code expires in 15 minutes.`
@@ -675,7 +675,7 @@ class ResendCodeBusinessHandler {
     private getEmailSubject(): string {
         const subjects = {
             'email_verification': 'Verify Your Email Address',
-            'phone_verification': 'Phone Verification Code',
+            'sms_verification': 'Phone Verification Code',
             'mfa': 'Login Verification Code',
             'password_reset': 'Password Reset Code',
             'account_recovery': 'Account Recovery Code'
@@ -687,7 +687,7 @@ class ResendCodeBusinessHandler {
     private getEmailTemplate(): string {
         const templates = {
             'email_verification': 'account-verification',
-            'phone_verification': 'phone-verification',
+            'sms_verification': 'phone-verification',
             'mfa': 'login-2fa',
             'password_reset': 'password-reset',
             'account_recovery': 'account-recovery'

@@ -25,9 +25,9 @@ interface TokenValidationResponseData {
     sessionId?: string;
     expiresAt?: Date;
     issuedAt?: Date;
-    remainingTime?: number; // seconds until expiration
+    remainingTime?: number;
+    invalidReason?: string; // Added to help debug why token is invalid
 
-    // Account info (if requested)
     account?: {
         accountId: string;
         email?: string;
@@ -44,7 +44,6 @@ interface TokenValidationResponseData {
         lastLogin?: Date;
     };
 
-    // Session info (if requested)
     session?: {
         sessionId: string;
         isActive: boolean;
@@ -62,9 +61,10 @@ interface TokenValidationResponseData {
         lastActivityAt?: Date;
         expiresAt?: Date;
         isPersistent?: boolean;
+        terminatedAt?: Date;
+        terminationReason?: string;
     };
 
-    // Security info
     securityContext?: {
         riskScore?: number;
         isTrusted?: boolean;
@@ -86,15 +86,14 @@ class TokenValidationBusinessHandler {
     private event: APIGatewayProxyEvent;
     private logger: ReturnType<typeof createLogger>;
 
-    // Environment variables
     private readonly JWT_SECRET: string;
     private readonly REFRESH_TOKEN_SECRET: string;
 
-    // Data holders
     private decodedToken?: JWTPayload;
     private account?: IAccount;
     private session?: ISession;
     private clientIP: string = '';
+    private invalidReason?: string;
 
     constructor(event: APIGatewayProxyEvent, requestData: TokenValidationRequest) {
         const requestId = event.requestContext?.requestId || 'unknown';
@@ -102,7 +101,6 @@ class TokenValidationBusinessHandler {
         this.requestData = requestData;
         this.clientIP = event.requestContext?.identity?.sourceIp || 'unknown';
 
-        // Get environment variables
         this.JWT_SECRET = process.env.JWT_SECRET || '';
         this.REFRESH_TOKEN_SECRET = process.env.REFRESH_TOKEN_SECRET || '';
 
@@ -116,96 +114,82 @@ class TokenValidationBusinessHandler {
         });
     }
 
-    /**
-     * Main processing method
-     */
     async processRequest(): Promise<TokenValidationResponseData> {
         this.logger.info('Starting token validation process');
 
         try {
-            // Step 1: Validate request data
             this.validateRequestData();
-
-            // Step 2: Decode and verify JWT token
             await this.verifyToken();
-
-            // Step 3: Load account if needed
-            if (this.requestData.includeAccountInfo || this.requestData.checkSessionActive) {
+            
+            // CRITICAL: Always check session status for logout detection
+            await this.checkSessionStatus();
+            
+            if (this.requestData.includeAccountInfo) {
                 await this.loadAccount();
             }
 
-            // Step 4: Load session if needed
-            if (this.requestData.includeSessionInfo || this.requestData.checkSessionActive) {
-                await this.loadSession();
-            }
-
-            // Step 5: Additional security checks
             await this.performSecurityChecks();
-
-            // Step 6: Build response
             return this.buildValidationResponse();
 
         } catch (error) {
-            this.logger.error('Token validation failed', { error: error instanceof Error ? error.message : 'Unknown error' });
+            this.logger.error('Token validation failed', { 
+                error: error instanceof Error ? error.message : 'Unknown error',
+                invalidReason: this.invalidReason 
+            });
 
-            // Return invalid response for any validation failure
             return {
                 valid: false,
-                tokenType: this.requestData.tokenType || 'access'
+                tokenType: this.requestData.tokenType || 'access',
+                invalidReason: this.invalidReason || (error instanceof Error ? error.message : 'Unknown error')
             };
         }
     }
 
-    /**
-     * Step 1: Validate request data
-     */
     private validateRequestData(): void {
         this.logger.debug('Validating token validation request data');
 
         if (!this.requestData.token) {
+            this.invalidReason = 'Token is required';
             throw new HttpError('Token is required', 400);
         }
 
         if (!this.requestData.token.trim()) {
+            this.invalidReason = 'Token cannot be empty';
             throw new HttpError('Token cannot be empty', 400);
         }
 
-        // Basic JWT format check (should have 3 parts separated by dots)
         const tokenParts = this.requestData.token.split('.');
         if (tokenParts.length !== 3) {
+            this.invalidReason = 'Invalid token format';
             throw new HttpError('Invalid token format', 400);
         }
 
         this.logger.debug('Request validation completed');
     }
 
-    /**
-     * Step 2: Decode and verify JWT token
-     */
     private async verifyToken(): Promise<void> {
         this.logger.debug('Verifying JWT token');
 
         try {
-            // First, try to decode without verification to get the token type
             const unverifiedPayload = jwt.decode(this.requestData.token) as JWTPayload;
 
             if (!unverifiedPayload || typeof unverifiedPayload !== 'object') {
+                this.invalidReason = 'Invalid token payload';
                 throw new HttpError('Invalid token payload', 401);
             }
 
             const tokenType = unverifiedPayload.type || this.requestData.tokenType || 'access';
-
-            // Choose the correct secret based on token type
             const secret = tokenType === 'refresh' ? this.REFRESH_TOKEN_SECRET : this.JWT_SECRET;
 
             if (!secret) {
+                this.invalidReason = 'Token validation configuration error';
                 throw new HttpError('Token validation configuration error', 500);
             }
 
-            // Verify the token with the correct secret
             const payload = jwt.verify(this.requestData.token, secret) as JWTPayload;
 
             if (!payload.accountId) {
+                this.invalidReason = 'Token missing required claims';
                 throw new HttpError('Token missing required claims', 401);
             }
 
@@ -217,21 +201,20 @@ class TokenValidationBusinessHandler {
             this.logger.debug('Token verification successful', {
                 accountId: this.decodedToken.accountId,
                 tokenType: this.decodedToken.type,
-                expiresAt: this.decodedToken.exp ? new Date(this.decodedToken.exp * 1000) : undefined
+                sessionId: this.decodedToken.sessionId
             });
 
         } catch (error) {
             if (error instanceof TokenExpiredError) {
-                this.logger.warn('Token has expired', {
-                    expiredAt: error.expiredAt
-                });
+                this.invalidReason = 'Token has expired';
+                this.logger.warn('Token has expired', { expiredAt: error.expiredAt });
                 throw new HttpError('Token has expired', 401);
             } else if (error instanceof JsonWebTokenError) {
-                this.logger.warn('Invalid token signature or format', {
-                    error: error.message
-                });
+                this.invalidReason = 'Invalid token signature';
+                this.logger.warn('Invalid token signature or format', { error: error.message });
                 throw new HttpError('Invalid token', 401);
             } else {
+                this.invalidReason = 'Token verification failed';
                 this.logger.error('Token verification error', {
                     error: error instanceof Error ? error.message : 'Unknown error'
                 });
@@ -241,8 +224,99 @@ class TokenValidationBusinessHandler {
     }
 
     /**
-     * Step 3: Load account if needed
+     * CRITICAL: Check if the session exists and is still active
+     * This catches logout scenarios where the session was terminated
      */
+    private async checkSessionStatus(): Promise<void> {
+        if (!this.decodedToken?.accountId) return;
+
+        this.logger.debug('Checking session status for logout detection');
+
+        // Search for the session without the isActive filter first
+        // to see if it exists but was terminated (logout)
+        const sessionQuery: any = {
+            accountId: this.decodedToken.accountId,
+            $or: [
+                { accessToken: this.requestData.token },
+                { 'refreshTokens.token': this.requestData.token }
+            ]
+        };
+
+        const sessionData = await Session.findOne(sessionQuery);
+
+        if (!sessionData) {
+            // Session not found - token might be invalid or revoked
+            this.invalidReason = 'Session not found - token may have been revoked';
+            this.logger.warn('Session not found for token', {
+                accountId: this.decodedToken.accountId,
+                tokenType: this.decodedToken.type
+            });
+            throw new HttpError('Session not found or has been revoked', 401);
+        }
+
+        this.session = sessionData;
+
+        // Check if user logged out (session terminated)
+        if (!this.session.isActive || this.session.status === 'terminated') {
+            this.invalidReason = `Session was terminated: ${this.session.terminationReason || 'logout'}`;
+            this.logger.warn('Token belongs to terminated session (user logged out)', {
+                sessionId: this.session.sessionId,
+                status: this.session.status,
+                terminationReason: this.session.terminationReason,
+                terminatedAt: this.session.terminatedAt,
+                terminatedBy: this.session.terminatedBy
+            });
+            throw new HttpError('Session has been terminated - user logged out', 401);
+        }
+
+        // Check if session is expired
+        if (this.session.expiresAt && this.session.expiresAt < new Date()) {
+            this.invalidReason = 'Session has expired';
+            this.logger.warn('Session has expired', {
+                sessionId: this.session.sessionId,
+                expiresAt: this.session.expiresAt
+            });
+            throw new HttpError('Session has expired', 401);
+        }
+
+        // Check session status
+        if (this.session.status !== 'active') {
+            this.invalidReason = `Session is ${this.session.status}`;
+            this.logger.warn('Session is not active', {
+                sessionId: this.session.sessionId,
+                status: this.session.status
+            });
+            throw new HttpError(`Session is ${this.session.status}`, 401);
+        }
+
+        // For refresh tokens, check if the specific token is revoked
+        if (this.decodedToken.type === 'refresh') {
+            const refreshToken = this.session.refreshTokens.find(
+                rt => rt.token === this.requestData.token
+            );
+
+            if (refreshToken?.isRevoked) {
+                this.invalidReason = `Refresh token was revoked: ${refreshToken.revokedReason || 'unknown'}`;
+                this.logger.warn('Refresh token was revoked', {
+                    sessionId: this.session.sessionId,
+                    revokedAt: refreshToken.revokedAt,
+                    revokedReason: refreshToken.revokedReason
+                });
+                throw new HttpError('Refresh token has been revoked', 401);
+            }
+        }
+
+        // Update last activity
+        this.session.lastActivityAt = new Date();
+        await this.session.save();
+
+        this.logger.debug('Session status check passed - session is active', {
+            sessionId: this.session.sessionId,
+            status: this.session.status,
+            isActive: this.session.isActive
+        });
+    }
+
     private async loadAccount(): Promise<void> {
         if (!this.decodedToken?.accountId) return;
 
@@ -251,17 +325,19 @@ class TokenValidationBusinessHandler {
         const accountData = await Account.findById(this.decodedToken.accountId);
 
         if (!accountData) {
+            this.invalidReason = 'Account not found';
             throw new HttpError('Account not found', 404);
         }
 
         this.account = accountData;
 
-        // Check if account is still active
         if (this.account.accountStatus.status === 'deactivated') {
+            this.invalidReason = 'Account has been deactivated';
             throw new HttpError('Account has been deactivated', 403);
         }
 
         if (this.account.accountStatus.status === 'suspended') {
+            this.invalidReason = 'Account is suspended';
             throw new HttpError('Account is suspended', 403);
         }
 
@@ -271,74 +347,17 @@ class TokenValidationBusinessHandler {
         });
     }
 
-    /**
-     * Step 4: Load session if needed
-     */
-    private async loadSession(): Promise<void> {
-        if (!this.decodedToken?.accountId) return;
-
-        this.logger.debug('Loading session information');
-
-        // Try to find session by token (for access tokens)
-        const sessionData = await Session.findOne({
-            accountId: this.decodedToken.accountId,
-            $or: [
-                { accessToken: this.requestData.token },
-                { 'refreshTokens.token': this.requestData.token }
-            ],
-            isActive: true
-        });
-
-        if (!sessionData && this.requestData.checkSessionActive) {
-            throw new HttpError('Session not found or inactive', 401);
-        }
-
-
-        if (sessionData) {
-            this.session = sessionData;
-
-            // Check if session is expired
-            if (this.session.expiresAt && this.session.expiresAt < new Date()) {
-                throw new HttpError('Session has expired', 401);
-            }
-
-            // Check if session status is active
-            if (this.session.status !== 'active') {
-                throw new HttpError(`Session is ${this.session.status}`, 401);
-            }
-
-            // Update last activity
-            this.session.lastActivityAt = new Date();
-            await this.session.save();
-
-            this.logger.debug('Session loaded and updated', {
-                sessionId: this.session.sessionId,
-                status: this.session.status
-            });
-        }
-    }
-
-    /**
-     * Step 5: Perform additional security checks
-     */
     private async performSecurityChecks(): Promise<void> {
         this.logger.debug('Performing security checks');
 
-        // Check if account is locked
         if (this.account?.security.lockedUntil && this.account.security.lockedUntil > new Date()) {
+            this.invalidReason = 'Account is currently locked';
             throw new HttpError('Account is currently locked', 423);
         }
 
-        // Log token validation for security monitoring
-        if (this.account) {
-            // You could add this to a security log or update account activity
-            this.logger.debug('Security checks passed');
-        }
+        this.logger.debug('Security checks passed');
     }
 
-    /**
-     * Step 6: Build validation response
-     */
     private buildValidationResponse(): TokenValidationResponseData {
         if (!this.decodedToken) {
             throw new Error('Token not decoded');
@@ -354,7 +373,6 @@ class TokenValidationBusinessHandler {
             remainingTime: this.decodedToken.exp ? Math.max(0, this.decodedToken.exp - Math.floor(Date.now() / 1000)) : undefined
         };
 
-        // Include account info if requested
         if (this.requestData.includeAccountInfo && this.account) {
             response.account = {
                 accountId: String(this.account._id),
@@ -366,7 +384,6 @@ class TokenValidationBusinessHandler {
             };
         }
 
-        // Include session info if requested
         if (this.requestData.includeSessionInfo && this.session) {
             response.session = {
                 sessionId: this.session.sessionId,
@@ -384,11 +401,12 @@ class TokenValidationBusinessHandler {
                 createdAt: this.session.createdAt,
                 lastActivityAt: this.session.lastActivityAt,
                 expiresAt: this.session.expiresAt,
-                isPersistent: this.session.isPersistent
+                isPersistent: this.session.isPersistent,
+                terminatedAt: this.session.terminatedAt,
+                terminationReason: this.session.terminationReason
             };
         }
 
-        // Include security context if session available
         if (this.session?.securityContext) {
             response.securityContext = {
                 riskScore: this.session.securityContext.riskScore,
@@ -418,21 +436,18 @@ const TokenValidationHandler = async (event: APIGatewayProxyEvent): Promise<APIG
     logger.info('Token validation handler started');
 
     try {
-        // Extract token from Authorization header or body
         let tokenRequest: TokenValidationRequest;
 
         if (event.httpMethod === 'POST' && event.body) {
-            // Token in request body
             const body = JSON.parse(event.body);
             tokenRequest = {
                 token: body.token,
                 tokenType: body.tokenType,
                 includeAccountInfo: body.includeAccountInfo || false,
                 includeSessionInfo: body.includeSessionInfo || false,
-                checkSessionActive: body.checkSessionActive || false
+                checkSessionActive: body.checkSessionActive !== false // Default to true
             };
         } else {
-            // Token in Authorization header
             const authHeader = event.headers?.Authorization || event.headers?.authorization;
             if (!authHeader) {
                 throw new HttpError('Authorization header is required', 401);
@@ -444,19 +459,16 @@ const TokenValidationHandler = async (event: APIGatewayProxyEvent): Promise<APIG
 
             tokenRequest = {
                 token,
-                tokenType: 'access', // Default for header-based validation
+                tokenType: 'access',
                 includeAccountInfo: event.queryStringParameters?.includeAccountInfo === 'true',
                 includeSessionInfo: event.queryStringParameters?.includeSessionInfo === 'true',
-                checkSessionActive: event.queryStringParameters?.checkSessionActive === 'true'
+                checkSessionActive: true // Always check session for header-based validation
             };
         }
 
-        // Connect to database if account/session info is needed
-        if (tokenRequest.includeAccountInfo || tokenRequest.includeSessionInfo || tokenRequest.checkSessionActive) {
-            await connectDB();
-        }
+        // ALWAYS connect to database to check session status
+        await connectDB();
 
-        // Process token validation
         const businessHandler = new TokenValidationBusinessHandler(event, tokenRequest);
         const result = await businessHandler.processRequest();
 
@@ -488,8 +500,6 @@ const TokenValidationHandler = async (event: APIGatewayProxyEvent): Promise<APIG
             error: error instanceof Error ? error.message : 'Unknown error'
         });
 
-        // For token validation, we want to return a 200 with valid: false
-        // rather than throwing errors, unless it's a request format issue
         if (error instanceof HttpError && [400, 422].includes(error.statusCode)) {
             throw error;
         }
@@ -498,7 +508,8 @@ const TokenValidationHandler = async (event: APIGatewayProxyEvent): Promise<APIG
             message: 'Token validation failed',
             data: {
                 valid: false,
-                tokenType: 'access'
+                tokenType: 'access',
+                invalidReason: error instanceof Error ? error.message : 'Unknown error'
             }
         });
     }
